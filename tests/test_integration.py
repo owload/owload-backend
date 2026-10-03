@@ -1376,9 +1376,8 @@ def _assert_storage_error(resp, failed: dict[str, str], forbidden: list[str], ro
     assert detail["rolledBack"] is rolled_back
     assert {t["targetId"]: t["role"] for t in detail["targets"]} == failed
     for t in detail["targets"]:
-        assert set(t) == {"targetId", "role", "label", "reason"}
+        assert set(t) == {"targetId", "role", "reason"}  # no name, no storage parameter
         assert t["reason"] == "UNREACHABLE"
-        assert t["label"] == "Custom storage"
     for text in forbidden:
         assert text not in resp.text, f"{text!r} leaked into the error response"
 

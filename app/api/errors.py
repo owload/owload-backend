@@ -12,10 +12,11 @@ def storage_write_failed(exc: BlockWriteError) -> HTTPException:
     (owload-docs/epics/0021). The body names the failed targets and the reason
     in a small fixed vocabulary, and says whether the write was fully undone.
 
-    It carries only what GET /drives/{driveId}/storage-targets already shows to
-    the same user (id, role, a display label) — never an endpoint, bucket,
-    object key, credential or the raw exception text; those stay in the server
-    log."""
+    It names no storage and exposes no parameter of one: only the target's id and
+    role (MASTER or SLAVE), which GET /drives/{driveId}/storage-targets already
+    shows to the same user, and the reason. Never an endpoint, bucket, object
+    key, credential, a storage's name or the raw exception text; those stay in
+    the server log."""
     return HTTPException(
         status_code=status.HTTP_502_BAD_GATEWAY,
         detail={
@@ -25,7 +26,6 @@ def storage_write_failed(exc: BlockWriteError) -> HTTPException:
                 {
                     "targetId": str(failure.target_id),
                     "role": failure.role,
-                    "label": failure.label,
                     "reason": failure.reason,
                 }
                 for failure in exc.failures

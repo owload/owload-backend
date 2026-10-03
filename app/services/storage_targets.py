@@ -20,7 +20,6 @@ from app.db.models import (
 from app.services.secrets import decrypt_secret
 
 _LEGACY_GLOBAL_PRESET_LABEL = "legacy-global (implicit)"
-CUSTOM_TARGET_LABEL = "Custom storage"
 
 
 @dataclass(frozen=True)
@@ -33,10 +32,6 @@ class ResolvedTarget:
     access_key: str
     secret_key: str  # already decrypted
     use_ssl: bool
-    # Human-readable name that is safe to show to the drive's users in error
-    # messages: the preset's label, or a neutral name for a custom target. It
-    # must never contain the endpoint, bucket or credentials.
-    label: str = ""
 
 
 def resolve_preset(preset: S3Preset) -> ResolvedTarget:
@@ -53,7 +48,6 @@ def resolve_preset(preset: S3Preset) -> ResolvedTarget:
         access_key=preset.access_key,
         secret_key=decrypt_secret(preset.secret_key),
         use_ssl=preset.use_ssl,
-        label=preset.label,
     )
 
 
@@ -69,7 +63,6 @@ def resolve_target(row: DriveStorageTarget) -> ResolvedTarget:
             access_key=preset.access_key,
             secret_key=decrypt_secret(preset.secret_key),
             use_ssl=preset.use_ssl,
-            label=preset.label,
         )
     cfg = row.custom_config
     return ResolvedTarget(
@@ -81,7 +74,6 @@ def resolve_target(row: DriveStorageTarget) -> ResolvedTarget:
         access_key=cfg["access_key"],
         secret_key=decrypt_secret(cfg["secret_key"]),
         use_ssl=cfg.get("use_ssl", True),
-        label=CUSTOM_TARGET_LABEL,
     )
 
 

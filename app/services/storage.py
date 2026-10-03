@@ -61,7 +61,6 @@ class BlockWriteError(RuntimeError):
             TargetFailure(
                 target_id=target_id,
                 role=by_id[target_id].role if target_id in by_id else "",
-                label=(by_id[target_id].label if target_id in by_id else "") or "Storage",
                 reason=classify_storage_error(exc),
             )
             for target_id, exc in errors.items()

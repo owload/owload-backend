@@ -215,24 +215,24 @@ The `502 Bad Gateway` answer then says which storage and why:
     "code": "STORAGE_TARGETS_UNAVAILABLE",
     "message": "The data could not be saved because a storage of this drive is not available.",
     "targets": [
-      { "targetId": "…", "role": "SLAVE", "label": "Hot EU", "reason": "UNREACHABLE" }
+      { "targetId": "…", "role": "SLAVE", "reason": "UNREACHABLE" }
     ],
     "rolledBack": true
   }
 }
 ```
 
-- `role` is `MASTER` or `SLAVE`; `label` is the preset's label, or `Custom
-  storage` for a custom target.
+- `role` is `MASTER` or `SLAVE`. The response names no storage: there is no label
+  and no connection parameter, only the target's id and role and the reason.
 - `reason` is one of `UNREACHABLE` (cannot connect, timeout, dropped connection,
   or the storage answering with a server-side failure / throttling),
   `ACCESS_DENIED` (wrong, expired or insufficient credentials),
   `BUCKET_NOT_FOUND`, `OTHER`.
 - `rolledBack` is `true` when nothing is left half-written; `false` if a
   compensating delete failed somewhere and part of the data may remain.
-- The body contains only what `GET /drives/{driveId}/storage-targets` already
-  shows to the same user — never an endpoint, a bucket, an object key,
-  credentials or raw exception text. The full error is logged on the server
+- The body contains only the target's id and role (both already shown by
+  `GET /drives/{driveId}/storage-targets`) and the reason — never a storage's
+  name, an endpoint, a bucket, an object key, credentials or raw exception text. The full error is logged on the server
   (`app/services/storage.py`, `app/services/storage_errors.py`).
 - A failed read of the master that a partial-block write needs is reported the
   same way, with the master as the failed target.

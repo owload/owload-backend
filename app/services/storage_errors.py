@@ -38,12 +38,12 @@ class StorageFailureReason:
 @dataclass(frozen=True)
 class TargetFailure:
     """One failed target of a fan-out write, in a form that is safe to show to
-    the drive's users: only what GET /drives/{id}/storage-targets exposes
-    already (id, role, a display label) plus the classified reason."""
+    the drive's users: its id and role (both already exposed by GET
+    /drives/{id}/storage-targets) plus the classified reason. Deliberately no
+    name and no connection parameter of the storage."""
 
     target_id: uuid.UUID
     role: str
-    label: str
     reason: str
 
 

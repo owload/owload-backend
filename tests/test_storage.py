@@ -343,8 +343,7 @@ async def test_classify_storage_error(exc, expected):
 
 async def test_block_write_error_exposes_only_safe_per_target_failures():
     master = _make_target(role="MASTER")
-    master = ResolvedTarget(**{**master.__dict__, "label": "Hot EU"})
-    slave = ResolvedTarget(**{**_make_target(role="SLAVE").__dict__, "label": "Custom storage"})
+    slave = _make_target(role="SLAVE")
 
     class _Raising(_FakeClient):
         def __init__(self, exc):
@@ -365,9 +364,10 @@ async def test_block_write_error_exposes_only_safe_per_target_failures():
         await storage.write_range([master, slave], uuid.uuid4(), 0, b"x" * 10)
 
     err = exc_info.value
-    assert [(f.target_id, f.role, f.label, f.reason) for f in err.failures] == [
-        (slave.id, "SLAVE", "Custom storage", StorageFailureReason.UNREACHABLE)
+    assert [(f.target_id, f.role, f.reason) for f in err.failures] == [
+        (slave.id, "SLAVE", StorageFailureReason.UNREACHABLE)
     ]
+    assert not hasattr(err.failures[0], "label")  # no storage name is carried at all
     assert err.rolled_back is True  # the master's successful PUT was deleted again
     # The raw error is kept for the server log, but nothing derived from it for the client leaks it.
     assert slave.id in err.errors
