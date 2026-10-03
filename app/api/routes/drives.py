@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_accessible_drive_or_404
+from app.api.errors import storage_write_failed
 from app.core.security import CurrentUser, get_current_user
 from app.db.models import (
     Drive,
@@ -23,7 +24,7 @@ from app.schemas.drive import CreateDriveIn, DeleteDriveIn, DriveInfoOut
 from app.schemas.drive_action import DriveActionLogOut
 from app.services.audit import log_action
 from app.services.secrets import encrypt_secret
-from app.services.storage import BlockStorage, get_storage
+from app.services.storage import BlockStorage, BlockWriteError, get_storage
 from app.services.storage_targets import get_active_targets, get_or_create_legacy_global_preset, resolve_target
 
 logger = logging.getLogger(__name__)
@@ -112,9 +113,12 @@ async def create_drive(
     # Recovery backup in S3. Written before commit: if this fails, the
     # exception propagates and the uncommitted INSERT is rolled back when the
     # session closes, so a drive never exists in Postgres without its backup.
-    await storage.write_drive_meta(
-        targets, drive.id, drive.owner_user_id, drive.title, drive.key_nonce, drive.counter_nonce, drive.created_at
-    )
+    try:
+        await storage.write_drive_meta(
+            targets, drive.id, drive.owner_user_id, drive.title, drive.key_nonce, drive.counter_nonce, drive.created_at
+        )
+    except BlockWriteError as exc:
+        raise storage_write_failed(exc) from exc
 
     log_action(db, drive.id, user.sub, DriveAction.CREATE_DRIVE, title=drive.title)
     await db.commit()

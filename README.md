@@ -201,19 +201,59 @@ else requires `x-access-token`.
   error. The implementation is `head_bucket` under `asyncio.timeout(5)`
   (`BlockStorage.test_connection`)
 
+### Storage errors on writes
+
+`POST /drives`, `POST /ops/{driveId}` and `POST /data` write to **all** of the
+drive's storage targets, and one unavailable storage fails the whole write
+(after a best-effort rollback of what already succeeded on the others — see
+[owload-docs/decisions/0011](../owload-docs/decisions/0011-multi-s3-storage-topology.md)).
+The `502 Bad Gateway` answer then says which storage and why:
+
+```json
+{
+  "detail": {
+    "code": "STORAGE_TARGETS_UNAVAILABLE",
+    "message": "The data could not be saved because a storage of this drive is not available.",
+    "targets": [
+      { "targetId": "…", "role": "SLAVE", "label": "Hot EU", "reason": "UNREACHABLE" }
+    ],
+    "rolledBack": true
+  }
+}
+```
+
+- `role` is `MASTER` or `SLAVE`; `label` is the preset's label, or `Custom
+  storage` for a custom target.
+- `reason` is one of `UNREACHABLE` (cannot connect, timeout, dropped connection,
+  or the storage answering with a server-side failure / throttling),
+  `ACCESS_DENIED` (wrong, expired or insufficient credentials),
+  `BUCKET_NOT_FOUND`, `OTHER`.
+- `rolledBack` is `true` when nothing is left half-written; `false` if a
+  compensating delete failed somewhere and part of the data may remain.
+- The body contains only what `GET /drives/{driveId}/storage-targets` already
+  shows to the same user — never an endpoint, a bucket, an object key,
+  credentials or raw exception text. The full error is logged on the server
+  (`app/services/storage.py`, `app/services/storage_errors.py`).
+- A failed read of the master that a partial-block write needs is reported the
+  same way, with the master as the failed target.
+- `DELETE /data` is unchanged (per-key failures are `502` with a string detail).
+
 ### Operation log (`filesystem-backend.ts`, append-only)
 - `GET /ops/{driveId}/{startBytePos}` — a slice of the log from the given
   position (`arraybuffer`); empty if `startBytePos` is beyond the current
   length; 400 for a negative value
 - `POST /ops/{driveId}` — raw bytes in the body, atomically appended to the end
-  of the log (`ops_data || :chunk`)
+  of the log (`ops_data || :chunk`). If a storage of the drive refuses the
+  backup write, `502` with the structured storage error (see "Storage errors on
+  writes" below) and the append is rolled back
 
 ### Sessions and the drive's byte data area
 - `POST /sessions?driveId=&byteLength=` — atomically reserves an area in the
   drive's `data_length`, returns `SessionInfo` (was `containerId`)
 - `POST /sessions/finalize/{sessionId}` — marks the session as finished
 - `POST /data?sessionId=&start=` — raw bytes in the body, written at the
-  absolute offset `session.byteOffset + start` (in the block S3 storage)
+  absolute offset `session.byteOffset + start` (in the block S3 storage). `502`
+  with the structured storage error if a storage of the drive refuses the write
 - `GET /data?driveId=&start=&end=` — streams a range of the drive's bytes
   (`StreamingResponse`, stops fetching blocks from S3 as soon as the client
   disconnects — important for `<video>`, which sends many Range requests and

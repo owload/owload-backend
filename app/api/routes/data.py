@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_accessible_drive_or_404
+from app.api.errors import storage_write_failed
 from app.core.security import CurrentUser, get_current_user
 from app.db.models import DriveAction, UploadSession
 from app.db.session import get_db
@@ -41,9 +42,7 @@ async def save_data_block(
     try:
         await storage.write_range(targets, session.drive_id, absolute_offset, body)
     except BlockWriteError as exc:
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, f"Storage backend failed to write some blocks: {exc}"
-        ) from exc
+        raise storage_write_failed(exc) from exc
     session.last_write_at = datetime.now(UTC)
     await db.commit()
 

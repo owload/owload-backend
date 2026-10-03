@@ -5,11 +5,12 @@ from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_accessible_drive_or_404
+from app.api.errors import storage_write_failed
 from app.core.security import CurrentUser, get_current_user
 from app.db.models import Drive, DriveAction
 from app.db.session import get_db
 from app.services.audit import log_action
-from app.services.storage import BlockStorage, get_storage
+from app.services.storage import BlockStorage, BlockWriteError, get_storage
 from app.services.storage_targets import get_active_targets
 
 router = APIRouter(prefix="/ops", tags=["ops"])
@@ -64,7 +65,10 @@ async def save_operation(
     # back when the session closes, so ops_data and its S3 backup never
     # diverge (no chunk is "acked" to Postgres without a matching backup).
     # Fanned out to every active target (owload-docs/decisions/0011).
-    await storage.append_ops_backup(targets, drive_id, chunk, start, new_length)
+    try:
+        await storage.append_ops_backup(targets, drive_id, chunk, start, new_length)
+    except BlockWriteError as exc:
+        raise storage_write_failed(exc) from exc
 
     log_action(db, drive_id, user.sub, DriveAction.SAVE_OP, start=start, end=new_length)
     await db.commit()

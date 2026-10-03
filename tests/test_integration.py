@@ -1352,3 +1352,122 @@ async def test_compaction_runs_on_every_target_and_survives_an_unreachable_one(c
     async with async_session_factory() as db:
         again = [r for r in await OpsCompactionService().compact_all_drives(db) if r["drive_id"] == drive_id]
     assert [r["batched_chunks"] for r in again] == [0, 0]
+
+
+# --- epic 0021: a failed write names the storage that failed, and only that ---
+
+DEAD_ENDPOINT = "http://localhost:1"
+
+
+def _custom_config(bucket: str, endpoint: str = MINIO_ENDPOINT) -> dict:
+    return {
+        "endpointUrl": endpoint, "region": "us-east-1", "bucket": bucket,
+        "accessKey": MINIO_ACCESS_KEY, "secretKey": MINIO_SECRET_KEY, "useSsl": False,
+    }
+
+
+def _assert_storage_error(resp, failed: dict[str, str], forbidden: list[str], rolled_back: bool = True) -> None:
+    """`failed` maps targetId -> expected role. `forbidden` are strings that
+    must not appear anywhere in the response (endpoints, buckets, credentials)."""
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "STORAGE_TARGETS_UNAVAILABLE"
+    assert isinstance(detail["message"], str) and detail["message"]
+    assert detail["rolledBack"] is rolled_back
+    assert {t["targetId"]: t["role"] for t in detail["targets"]} == failed
+    for t in detail["targets"]:
+        assert set(t) == {"targetId", "role", "label", "reason"}
+        assert t["reason"] == "UNREACHABLE"
+        assert t["label"] == "Custom storage"
+    for text in forbidden:
+        assert text not in resp.text, f"{text!r} leaked into the error response"
+
+
+async def test_write_endpoints_name_the_failed_storage_and_leave_nothing_behind(client_as):
+    master_bucket = f"test-wrerr-master-{uuid.uuid4().hex[:12]}"
+    slave_bucket = f"test-wrerr-slave-{uuid.uuid4().hex[:12]}"
+    dead_bucket = f"test-wrerr-dead-{uuid.uuid4().hex[:12]}"
+    await _ensure_minio_bucket(master_bucket)
+    await _ensure_minio_bucket(slave_bucket)
+    forbidden = ["localhost:1", dead_bucket, master_bucket, slave_bucket, MINIO_ACCESS_KEY, "Traceback"]
+
+    async with client_as(USER_A) as c:
+        drive_id = (
+            await c.post(
+                "/drives",
+                json={"title": "Write-error test drive", "keyNonce": "aa", "counterNonce": "bb",
+                      "customConfig": _custom_config(master_bucket)},
+            )
+        ).json()["id"]
+        base = f"/drives/{drive_id}/storage-targets"
+        # An empty drive: both new slaves are ACTIVE at once and take part in every write.
+        assert (await c.post(base, json={"customConfig": _custom_config(slave_bucket)})).json()["status"] == "ACTIVE"
+        dead = (await c.post(base, json={"customConfig": _custom_config(dead_bucket, DEAD_ENDPOINT)})).json()
+        assert dead["status"] == "ACTIVE"
+
+        # POST /ops: used to be a bare 500.
+        resp = await c.post(f"/ops/{drive_id}", content=b"\x01\x02\x03")
+        _assert_storage_error(resp, {dead["id"]: "SLAVE"}, forbidden)
+        # Rolled back everywhere: Postgres did not grow, the healthy storages hold no chunk.
+        assert (await c.get(f"/ops/{drive_id}/0")).content == b""
+        for bucket in (master_bucket, slave_bucket):
+            assert await _minio_list_keys(bucket, f"ops/{drive_id}/") == []
+
+        # POST /data: used to be an unreadable string built from the raw exceptions.
+        session = (await c.post("/sessions", params={"driveId": drive_id, "byteLength": 10})).json()
+        resp = await c.post("/data", params={"sessionId": session["sessionId"], "start": 0}, content=b"0123456789")
+        _assert_storage_error(resp, {dead["id"]: "SLAVE"}, forbidden)
+        for bucket in (master_bucket, slave_bucket):
+            assert await _minio_list_keys(bucket, f"data/{drive_id}/") == []
+
+
+async def test_write_endpoints_blame_the_master_when_it_is_the_unavailable_one(client_as):
+    """A partial-block write first reads the block from the master; if the
+    master is down that read fails. It must be reported as the master's
+    failure (not a bare 500), and POST /ops must name it too."""
+    good_bucket = f"test-wrerr-good-{uuid.uuid4().hex[:12]}"
+    dead_bucket = f"test-wrerr-deadmaster-{uuid.uuid4().hex[:12]}"
+    await _ensure_minio_bucket(good_bucket)
+    forbidden = ["localhost:1", dead_bucket, good_bucket, MINIO_ACCESS_KEY, "Traceback"]
+
+    async with client_as(USER_A) as c:
+        drive_id = (
+            await c.post(
+                "/drives",
+                json={"title": "Dead-master test drive", "keyNonce": "aa", "counterNonce": "bb",
+                      "customConfig": _custom_config(good_bucket)},
+            )
+        ).json()["id"]
+        base = f"/drives/{drive_id}/storage-targets"
+        dead = (await c.post(base, json={"customConfig": _custom_config(dead_bucket, DEAD_ENDPOINT)})).json()
+        assert (await c.patch(f"{base}/{dead['id']}/make-master")).status_code == 204
+
+        session = (await c.post("/sessions", params={"driveId": drive_id, "byteLength": 10})).json()
+        resp = await c.post("/data", params={"sessionId": session["sessionId"], "start": 0}, content=b"0123456789")
+        _assert_storage_error(resp, {dead["id"]: "MASTER"}, forbidden)
+
+        resp = await c.post(f"/ops/{drive_id}", content=b"\x01")
+        _assert_storage_error(resp, {dead["id"]: "MASTER"}, forbidden)
+        assert await _minio_list_keys(good_bucket, f"data/{drive_id}/") == []
+        assert await _minio_list_keys(good_bucket, f"ops/{drive_id}/") == []
+
+
+async def test_creating_a_drive_on_an_unavailable_storage_explains_why_and_creates_nothing(client_as):
+    title = f"Dead-storage drive {uuid.uuid4().hex[:8]}"
+    dead_bucket = f"test-wrerr-create-{uuid.uuid4().hex[:12]}"
+
+    async with client_as(USER_A) as c:
+        resp = await c.post(
+            "/drives",
+            json={"title": title, "keyNonce": "aa", "counterNonce": "bb",
+                  "customConfig": _custom_config(dead_bucket, DEAD_ENDPOINT)},
+        )
+        assert resp.status_code == 502, resp.text
+        detail = resp.json()["detail"]
+        assert detail["code"] == "STORAGE_TARGETS_UNAVAILABLE"
+        assert [(t["role"], t["reason"]) for t in detail["targets"]] == [("MASTER", "UNREACHABLE")]
+        for text in ("localhost:1", dead_bucket, MINIO_ACCESS_KEY):
+            assert text not in resp.text
+
+        # The failed creation was rolled back: the drive does not exist.
+        assert title not in [d["title"] for d in (await c.get("/drives")).json()]

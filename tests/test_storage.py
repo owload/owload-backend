@@ -284,3 +284,137 @@ async def test_test_connection_times_out_instead_of_hanging(monkeypatch):
 
     assert ok is False
     assert "timed out" in error
+
+
+# --- failure classification and the client-safe view of a failed write (epic 0021) ---
+
+from botocore.exceptions import (  # noqa: E402
+    ClientError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    NoCredentialsError,
+    ReadTimeoutError,
+)
+
+from app.services.storage_errors import StorageFailureReason, classify_storage_error  # noqa: E402
+
+# Strings that must never reach a client: they are what the raw errors contain.
+_SECRET_HOST = "s3.secret-host.example"
+_SECRET_BUCKET = "private-bucket-name"
+_SECRET_KEY_ID = "fake-access-key-id-for-tests"
+
+
+def _client_error(code: str, status: int) -> ClientError:
+    return ClientError(
+        {
+            "Error": {"Code": code, "Message": f"{_SECRET_BUCKET} {_SECRET_KEY_ID}"},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        },
+        "PutObject",
+    )
+
+
+@pytest.mark.parametrize(
+    "exc, expected",
+    [
+        (EndpointConnectionError(endpoint_url=f"https://{_SECRET_HOST}/{_SECRET_BUCKET}"), StorageFailureReason.UNREACHABLE),
+        (ConnectTimeoutError(endpoint_url=f"https://{_SECRET_HOST}"), StorageFailureReason.UNREACHABLE),
+        (ReadTimeoutError(endpoint_url=f"https://{_SECRET_HOST}"), StorageFailureReason.UNREACHABLE),
+        (TimeoutError("timed out"), StorageFailureReason.UNREACHABLE),
+        (ConnectionResetError("reset by peer"), StorageFailureReason.UNREACHABLE),
+        (_client_error("ServiceUnavailable", 503), StorageFailureReason.UNREACHABLE),
+        (_client_error("SlowDown", 503), StorageFailureReason.UNREACHABLE),
+        (_client_error("InternalError", 500), StorageFailureReason.UNREACHABLE),
+        (_client_error("AccessDenied", 403), StorageFailureReason.ACCESS_DENIED),
+        (_client_error("InvalidAccessKeyId", 403), StorageFailureReason.ACCESS_DENIED),
+        (_client_error("SignatureDoesNotMatch", 403), StorageFailureReason.ACCESS_DENIED),
+        (_client_error("ExpiredToken", 400), StorageFailureReason.ACCESS_DENIED),
+        (_client_error("SomethingElse", 403), StorageFailureReason.ACCESS_DENIED),  # decided by HTTP status
+        (NoCredentialsError(), StorageFailureReason.ACCESS_DENIED),
+        (_client_error("NoSuchBucket", 404), StorageFailureReason.BUCKET_NOT_FOUND),
+        (_client_error("EntityTooLarge", 400), StorageFailureReason.OTHER),
+        (RuntimeError("anything else"), StorageFailureReason.OTHER),
+        (ValueError("not an S3 error at all"), StorageFailureReason.OTHER),
+    ],
+)
+async def test_classify_storage_error(exc, expected):
+    assert classify_storage_error(exc) == expected
+
+
+async def test_block_write_error_exposes_only_safe_per_target_failures():
+    master = _make_target(role="MASTER")
+    master = ResolvedTarget(**{**master.__dict__, "label": "Hot EU"})
+    slave = ResolvedTarget(**{**_make_target(role="SLAVE").__dict__, "label": "Custom storage"})
+
+    class _Raising(_FakeClient):
+        def __init__(self, exc):
+            super().__init__()
+            self._exc = exc
+
+        async def put_object(self, Bucket, Key, Body, **kwargs):
+            raise self._exc
+
+    storage = _storage_with_fake_clients(
+        {
+            master.id: _FakeClient(),
+            slave.id: _Raising(EndpointConnectionError(endpoint_url=f"https://{_SECRET_HOST}/{_SECRET_BUCKET}")),
+        }
+    )
+
+    with pytest.raises(BlockWriteError) as exc_info:
+        await storage.write_range([master, slave], uuid.uuid4(), 0, b"x" * 10)
+
+    err = exc_info.value
+    assert [(f.target_id, f.role, f.label, f.reason) for f in err.failures] == [
+        (slave.id, "SLAVE", "Custom storage", StorageFailureReason.UNREACHABLE)
+    ]
+    assert err.rolled_back is True  # the master's successful PUT was deleted again
+    # The raw error is kept for the server log, but nothing derived from it for the client leaks it.
+    assert slave.id in err.errors
+    exposed = repr(err.failures) + str(err)
+    assert _SECRET_HOST not in exposed and _SECRET_BUCKET not in exposed
+
+
+async def test_block_write_error_reports_a_failed_rollback():
+    master, slave = _make_target(role="MASTER"), _make_target(role="SLAVE")
+
+    class _CannotRollBack(_FakeClient):
+        async def delete_object(self, Bucket, Key):
+            raise RuntimeError("delete failed too")
+
+    storage = _storage_with_fake_clients({master.id: _CannotRollBack(), slave.id: _FailingPutClient()})
+
+    with pytest.raises(BlockWriteError) as exc_info:
+        await storage.write_range([master, slave], uuid.uuid4(), 0, b"x" * 10)
+
+    assert exc_info.value.rolled_back is False  # part of the write may remain on the master
+
+
+async def test_failed_master_read_is_reported_as_a_master_write_failure_and_rolls_back():
+    """A partial-block write first reads the block from the master. If that
+    read fails, it is the master that is to blame, and any blocks of the same
+    call that were already written must be undone."""
+    from app.services.storage import BLOCK_SIZE
+
+    master, slave = _make_target(role="MASTER"), _make_target(role="SLAVE")
+
+    class _MasterReadFails(_FakeClient):
+        async def get_object(self, Bucket, Key, Range=None):
+            raise EndpointConnectionError(endpoint_url=f"https://{_SECRET_HOST}")
+
+    c_master, c_slave = _MasterReadFails(), _FakeClient()
+    storage = _storage_with_fake_clients({master.id: c_master, slave.id: c_slave})
+
+    # Block 0 is a full block (written without any read); block 1 is partial and needs the master read.
+    data = b"a" * BLOCK_SIZE + b"b" * 10
+    with pytest.raises(BlockWriteError) as exc_info:
+        await storage.write_range([master, slave], uuid.uuid4(), 0, data)
+
+    err = exc_info.value
+    assert [(f.target_id, f.role, f.reason) for f in err.failures] == [
+        (master.id, "MASTER", StorageFailureReason.UNREACHABLE)
+    ]
+    assert err.rolled_back is True
+    # Block 0 had been written on both targets; both copies are deleted again.
+    assert sum(c["op"] == "delete_object" for c in c_master.calls) == 1
+    assert sum(c["op"] == "delete_object" for c in c_slave.calls) == 1

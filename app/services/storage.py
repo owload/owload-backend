@@ -2,13 +2,15 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from datetime import datetime
+from typing import NoReturn
 
 import aioboto3
 from botocore.exceptions import ClientError
 
+from app.services.storage_errors import TargetFailure, classify_storage_error
 from app.services.storage_targets import ResolvedTarget, get_master
 
 logger = logging.getLogger(__name__)
@@ -37,11 +39,35 @@ class BlockWriteError(RuntimeError):
     a drive's storage targets. Whatever succeeded on the other targets has
     already been rolled back (compensating delete) on a best-effort basis —
     a rollback that itself fails is a known, accepted risk, logged but not
-    re-raised (see owload-docs/epics/0014-storage-replication-reconciliation)."""
+    re-raised (see owload-docs/epics/0014-storage-replication-reconciliation).
 
-    def __init__(self, errors: dict[uuid.UUID, BaseException]) -> None:
+    `errors` holds the raw exceptions (server-side use only). `failures` is the
+    same information classified and stripped of anything that must not reach a
+    client (owload-docs/epics/0021); `rolled_back` is False if a compensating
+    delete failed somewhere, i.e. part of the write may remain. The message does
+    not include the raw exceptions, so str(exc) is safe to log but is not meant
+    for the client either — build the response from `failures`."""
+
+    def __init__(
+        self,
+        errors: dict[uuid.UUID, BaseException],
+        targets: Sequence[ResolvedTarget] = (),
+        rolled_back: bool = True,
+    ) -> None:
         self.errors = errors
-        super().__init__(f"write failed on {len(errors)} target(s): {errors}")
+        self.rolled_back = rolled_back
+        by_id = {t.id: t for t in targets}
+        self.failures = [
+            TargetFailure(
+                target_id=target_id,
+                role=by_id[target_id].role if target_id in by_id else "",
+                label=(by_id[target_id].label if target_id in by_id else "") or "Storage",
+                reason=classify_storage_error(exc),
+            )
+            for target_id, exc in errors.items()
+        ]
+        summary = ", ".join(f"{f.target_id} ({f.reason})" for f in self.failures)
+        super().__init__(f"write failed on {len(errors)} target(s): {summary}")
 
 
 class BlockStorage:
@@ -105,22 +131,42 @@ class BlockStorage:
                 return b""
             raise
 
-    async def _rollback_puts(self, clients: dict[uuid.UUID, object], committed: list[tuple[ResolvedTarget, str]]) -> None:
+    async def _rollback_puts(self, clients: dict[uuid.UUID, object], committed: list[tuple[ResolvedTarget, str]]) -> bool:
         """Best-effort compensating DELETE for keys that were successfully
         PUT on some targets before the fan-out failed on another. A failure
         here is logged, not raised — the caller is already raising the
-        original error, and this is an accepted risk (see BlockWriteError)."""
+        original error, and this is an accepted risk (see BlockWriteError).
+        Returns True if every delete went through (or there was nothing to
+        delete), False if part of the write may remain."""
 
-        async def _delete_one(target: ResolvedTarget, key: str) -> None:
+        async def _delete_one(target: ResolvedTarget, key: str) -> bool:
             try:
                 await clients[target.id].delete_object(Bucket=target.bucket, Key=key)
+                return True
             except Exception:
                 logger.error(
                     "compensating rollback delete failed: target=%s bucket=%s key=%s",
                     target.id, target.bucket, key, exc_info=True,
                 )
+                return False
 
-        await asyncio.gather(*(_delete_one(t, k) for t, k in committed), return_exceptions=True)
+        results = await asyncio.gather(*(_delete_one(t, k) for t, k in committed), return_exceptions=True)
+        return all(r is True for r in results)
+
+    async def _raise_write_error(
+        self,
+        clients: dict[uuid.UUID, object],
+        committed: list[tuple[ResolvedTarget, str]],
+        targets: list[ResolvedTarget],
+        errors: dict[uuid.UUID, BaseException],
+    ) -> NoReturn:
+        """Common tail of a failed fan-out write: log what really happened (the
+        only place the raw errors are kept), undo what already succeeded, and
+        raise a BlockWriteError that carries the classified, client-safe view."""
+        for target_id, exc in errors.items():
+            logger.error("storage write failed: target=%s", target_id, exc_info=exc)
+        rolled_back = await self._rollback_puts(clients, committed)
+        raise BlockWriteError(errors, targets, rolled_back)
 
     async def write_range(self, targets: list[ResolvedTarget], drive_id: uuid.UUID, offset: int, data: bytes) -> None:
         if not data:
@@ -145,7 +191,11 @@ class BlockStorage:
                 if offset_in_block == 0 and take == BLOCK_SIZE:
                     new_block = chunk
                 else:
-                    existing = bytearray(await self._get_block(master_client, master.bucket, key))
+                    try:
+                        existing = bytearray(await self._get_block(master_client, master.bucket, key))
+                    except Exception as exc:
+                        # The master could not even be read to merge the partial block.
+                        await self._raise_write_error(clients, committed, targets, {master.id: exc})
                     end_in_block = offset_in_block + take
                     if len(existing) < end_in_block:
                         existing.extend(b"\x00" * (end_in_block - len(existing)))
@@ -160,8 +210,7 @@ class BlockStorage:
                 committed.extend((t, key) for t, r in zip(targets, results) if not isinstance(r, BaseException))
 
                 if errors:
-                    await self._rollback_puts(clients, committed)
-                    raise BlockWriteError(errors)
+                    await self._raise_write_error(clients, committed, targets, errors)
 
                 pos += take
 
@@ -298,8 +347,7 @@ class BlockStorage:
             committed = [(t, key) for t, r in zip(targets, results) if not isinstance(r, BaseException)]
 
             if errors:
-                await self._rollback_puts(clients, committed)
-                raise BlockWriteError(errors)
+                await self._raise_write_error(clients, committed, targets, errors)
 
     async def test_connection(self, target: ResolvedTarget) -> tuple[bool, str | None]:
         """Checks that `target`'s credentials/endpoint can actually reach
