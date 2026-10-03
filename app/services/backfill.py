@@ -3,9 +3,9 @@ batches, drive meta) from its master onto a slave target that's still
 `PROVISIONING` (added via POST /drives/{driveId}/storage-targets, epic
 0012 task 0005), then flips that target to `ACTIVE`.
 
-Unlike app/services/compaction.py, this isn't purely S3-side — it needs
-Postgres to know which target is PROVISIONING and to resolve both its
-and its drive's master's connection details (drive_storage_targets).
+Like app/services/compaction.py, this needs Postgres: to know which target
+is PROVISIONING and to resolve both its and its drive's master's connection
+details (drive_storage_targets).
 
 Order matters (see owload-docs/decisions/0012): a target only ever becomes
 PROVISIONING *after* it's already receiving live fan-out writes (epic

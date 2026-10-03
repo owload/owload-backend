@@ -1,6 +1,8 @@
-"""Tests the ops/ -> ops-batches/ compaction service against real S3 (whatever
-S3_* is configured in .env — MinIO or a real bucket). Touches only S3, no
-Postgres/API involved. Skips automatically if S3 isn't reachable.
+"""Tests the ops/ -> ops-batches/ compaction of a single storage target against
+real S3 (whatever S3_* is configured — MinIO or a real bucket). Touches only S3,
+no Postgres/API involved. Skips automatically if S3 isn't reachable. The
+multi-target behaviour (every target of a drive, via Postgres) is covered in
+test_integration.py.
 """
 
 import uuid
@@ -54,7 +56,6 @@ async def _cleanup(drive_id: str) -> None:
 
 
 async def test_compact_merges_contiguous_chunks_without_data_loss():
-    settings = get_settings()
     storage = BlockStorage()
     target = _target_from_settings()
     drive_id = str(uuid.uuid4())
@@ -67,26 +68,25 @@ async def test_compact_merges_contiguous_chunks_without_data_loss():
     expected = b"".join(pieces)
 
     try:
-        assert await reconstruct_ops_from_backup(settings, drive_id) == expected
+        assert await reconstruct_ops_from_backup(target, drive_id) == expected
 
-        service = OpsCompactionService(settings)
-        stats = await service.compact_drive(drive_id)
+        service = OpsCompactionService()
+        stats = await service.compact_drive(target, drive_id)
         assert stats["batched_chunks"] == len(pieces)
         assert stats["cleaned_up"] == 0
 
-        assert await reconstruct_ops_from_backup(settings, drive_id) == expected
+        assert await reconstruct_ops_from_backup(target, drive_id) == expected
 
         async with storage._client_ctx(target) as client:
-            remaining = await client.list_objects_v2(Bucket=settings.s3_bucket, Prefix=f"ops/{drive_id}/")
+            remaining = await client.list_objects_v2(Bucket=target.bucket, Prefix=f"ops/{drive_id}/")
             assert remaining.get("KeyCount", 0) == 0
-            batches = await client.list_objects_v2(Bucket=settings.s3_bucket, Prefix=f"ops-batches/{drive_id}/")
+            batches = await client.list_objects_v2(Bucket=target.bucket, Prefix=f"ops-batches/{drive_id}/")
             assert batches.get("KeyCount") == 1
     finally:
         await _cleanup(drive_id)
 
 
 async def test_compact_leaves_gap_for_a_later_run():
-    settings = get_settings()
     storage = BlockStorage()
     target = _target_from_settings()
     drive_id = str(uuid.uuid4())
@@ -97,12 +97,12 @@ async def test_compact_leaves_gap_for_a_later_run():
     await storage.append_ops_backup([target], drive_id, b"ccccc", 20, 25)
 
     try:
-        service = OpsCompactionService(settings)
-        stats = await service.compact_drive(drive_id)
+        service = OpsCompactionService()
+        stats = await service.compact_drive(target, drive_id)
         assert stats["batched_chunks"] == 2  # only the contiguous [0,10) run
 
         async with storage._client_ctx(target) as client:
-            remaining = await client.list_objects_v2(Bucket=settings.s3_bucket, Prefix=f"ops/{drive_id}/")
+            remaining = await client.list_objects_v2(Bucket=target.bucket, Prefix=f"ops/{drive_id}/")
             remaining_keys = [o["Key"] for o in remaining.get("Contents", [])]
             assert len(remaining_keys) == 1
             assert remaining_keys[0].endswith("00000000000000000020-00000000000000000025.bin")
@@ -114,7 +114,6 @@ async def test_compact_is_crash_safe_and_cleans_up_leftover_duplicates():
     """Simulates a run that wrote the batch but was killed before deleting
     the originals: the leftover chunks must be cleaned up (not re-batched,
     not double-counted) on the next run."""
-    settings = get_settings()
     storage = BlockStorage()
     target = _target_from_settings()
     drive_id = str(uuid.uuid4())
@@ -123,22 +122,22 @@ async def test_compact_is_crash_safe_and_cleans_up_leftover_duplicates():
     await storage.append_ops_backup([target], drive_id, b"67890", 5, 10)
 
     try:
-        service = OpsCompactionService(settings)
-        first = await service.compact_drive(drive_id)
+        service = OpsCompactionService()
+        first = await service.compact_drive(target, drive_id)
         assert first["batched_chunks"] == 2
 
         # Simulate the crash: re-create the already-batched chunk objects.
         await storage.append_ops_backup([target], drive_id, b"12345", 0, 5)
         await storage.append_ops_backup([target], drive_id, b"67890", 5, 10)
 
-        second = await service.compact_drive(drive_id)
+        second = await service.compact_drive(target, drive_id)
         assert second["batched_chunks"] == 0
         assert second["cleaned_up"] == 2
 
-        assert await reconstruct_ops_from_backup(settings, drive_id) == b"1234567890"
+        assert await reconstruct_ops_from_backup(target, drive_id) == b"1234567890"
 
         async with storage._client_ctx(target) as client:
-            remaining = await client.list_objects_v2(Bucket=settings.s3_bucket, Prefix=f"ops/{drive_id}/")
+            remaining = await client.list_objects_v2(Bucket=target.bucket, Prefix=f"ops/{drive_id}/")
             assert remaining.get("KeyCount", 0) == 0
     finally:
         await _cleanup(drive_id)

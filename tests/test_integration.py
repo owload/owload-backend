@@ -18,8 +18,10 @@ from app.db.models import Drive, DriveStorageTarget, S3Preset, S3Tier, StorageTa
 from app.db.session import async_session_factory, engine
 from app.main import app
 from app.services.backfill import BackfillService
+from app.services.compaction import OpsCompactionService, reconstruct_ops_from_backup
 from app.services.secrets import encrypt_secret
 from app.services.storage import BLOCK_SIZE
+from app.services.storage_targets import get_active_targets, get_master
 
 MINIO_ENDPOINT = "http://localhost:9000"
 MINIO_ACCESS_KEY = "minioadmin"
@@ -50,6 +52,16 @@ async def _minio_get_object(bucket: str, key: str) -> bytes | None:
             return None
         async with resp["Body"] as body:
             return await body.read()
+
+
+async def _minio_list_keys(bucket: str, prefix: str) -> list[str]:
+    session = aioboto3.Session()
+    async with session.client(
+        "s3", endpoint_url=MINIO_ENDPOINT, region_name="us-east-1",
+        aws_access_key_id=MINIO_ACCESS_KEY, aws_secret_access_key=MINIO_SECRET_KEY, use_ssl=False,
+    ) as client:
+        resp = await client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        return [o["Key"] for o in resp.get("Contents", [])]
 
 pytestmark = pytest.mark.asyncio
 
@@ -1263,3 +1275,80 @@ async def test_drive_actions_keyset_pagination_survives_concurrent_insert(client
         seen_baseline = [i for i in seen_ids if i in baseline_ids]
         assert len(seen_baseline) == len(baseline_ids)  # no skips, no duplicates
         assert set(seen_baseline) == baseline_ids
+
+
+async def test_compaction_runs_on_every_target_and_survives_an_unreachable_one(client_as):
+    """Epic 0012 task 0010: compaction must go through each of a drive's
+    storage targets independently (every target holds its own copy of ops/),
+    not just a single global bucket, and one unreachable target must not hold
+    up the others. Master and slave live on separate local MinIO buckets so
+    the per-target result is verifiable on each; a third slave points at a
+    dead address."""
+    master_bucket = f"test-compact-master-{uuid.uuid4().hex[:12]}"
+    slave_bucket = f"test-compact-slave-{uuid.uuid4().hex[:12]}"
+    await _ensure_minio_bucket(master_bucket)
+    await _ensure_minio_bucket(slave_bucket)
+
+    def _custom(bucket: str, endpoint: str = MINIO_ENDPOINT) -> dict:
+        return {
+            "endpointUrl": endpoint, "region": "us-east-1", "bucket": bucket,
+            "accessKey": MINIO_ACCESS_KEY, "secretKey": MINIO_SECRET_KEY, "useSsl": False,
+        }
+
+    chunks = [b"op-one|", b"op-two|", b"op-three|", b"op-four"]
+    expected = b"".join(chunks)
+
+    async with client_as(USER_A) as c:
+        drive = (
+            await c.post(
+                "/drives",
+                json={"title": "Compaction test drive", "keyNonce": "aa", "counterNonce": "bb",
+                      "customConfig": _custom(master_bucket)},
+            )
+        ).json()
+        drive_id = drive["id"]
+        base = f"/drives/{drive_id}/storage-targets"
+
+        # Empty drive -> the slave is ACTIVE right away and takes part in every write below.
+        resp = await c.post(base, json={"customConfig": _custom(slave_bucket)})
+        assert resp.status_code == 201 and resp.json()["status"] == "ACTIVE"
+
+        for chunk in chunks:
+            assert (await c.post(f"/ops/{drive_id}", content=chunk)).status_code == 204
+
+        # Added after the writes, so it is never written to; it only has to be
+        # skipped by compaction, not to block it.
+        resp = await c.post(base, json={"customConfig": _custom("whatever", "http://localhost:1")})
+        assert resp.status_code == 201
+        dead_target_id = resp.json()["id"]
+
+    # Fan-out wrote its own copy of every chunk onto both live targets.
+    for bucket in (master_bucket, slave_bucket):
+        assert len(await _minio_list_keys(bucket, f"ops/{drive_id}/")) == len(chunks)
+
+    async with async_session_factory() as db:
+        results = await OpsCompactionService().compact_all_drives(db)
+
+    ours = [r for r in results if r["drive_id"] == drive_id]
+    assert len(ours) == 2  # master + the reachable slave; the dead one was skipped, not fatal
+    assert dead_target_id not in {r["target_id"] for r in ours}
+    assert all(r["batched_chunks"] == len(chunks) for r in ours)
+
+    # Each target was compacted on its own: no loose chunks left, one batch each.
+    for bucket in (master_bucket, slave_bucket):
+        assert await _minio_list_keys(bucket, f"ops/{drive_id}/") == []
+        assert len(await _minio_list_keys(bucket, f"ops-batches/{drive_id}/")) == 1
+
+    # Recovery reads the log back from the master, and the copy on the slave is identical.
+    async with async_session_factory() as db:
+        targets = await get_active_targets(db, uuid.UUID(drive_id))
+    master = get_master(targets)
+    assert master.bucket == master_bucket
+    assert await reconstruct_ops_from_backup(master, drive_id) == expected
+    slave = next(t for t in targets if t.bucket == slave_bucket)
+    assert await reconstruct_ops_from_backup(slave, drive_id) == expected
+
+    # A second pass has nothing left to merge.
+    async with async_session_factory() as db:
+        again = [r for r in await OpsCompactionService().compact_all_drives(db) if r["drive_id"] == drive_id]
+    assert [r["batched_chunks"] for r in again] == [0, 0]

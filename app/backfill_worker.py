@@ -7,7 +7,7 @@ Usage:
     python -m app.backfill_worker --loop                # repeats forever
     python -m app.backfill_worker --loop --interval 60   # every minute
 
-Unlike app/compaction_worker.py, this does touch Postgres — it needs
+Like app/compaction_worker.py, this needs Postgres — it reads
 drive_storage_targets to know which target is PROVISIONING and to resolve
 both its and its drive's master's connection details.
 """

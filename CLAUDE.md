@@ -143,9 +143,11 @@ no explicit rollback needed — closing an uncommitted session discards it).
 This is the pattern to follow for any future "write must survive Postgres
 loss" feature: S3 write first, commit second, never the other order.
 
-`app/services/compaction.py` + `app/compaction_worker.py` (standalone, run
-via cron or the `compaction` docker-compose profile — see README) merges
-the small `ops/*.bin` chunks into larger `ops-batches/*.bin` objects,
+`app/services/compaction.py` + `app/compaction_worker.py` (run via cron or
+the `compaction` docker-compose profile — see README) merges the small
+`ops/*.bin` chunks into larger `ops-batches/*.bin` objects, separately on each
+ACTIVE/PROVISIONING storage target of each drive (each target holds its own
+copy; targets come from Postgres, an unreachable one is skipped),
 crash-safely (batch written before originals deleted, so a crash mid-way
 leaves double coverage, never data loss — the next run cleans up the
 leftover chunks it finds already covered by an existing batch, before

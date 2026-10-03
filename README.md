@@ -284,12 +284,18 @@ backup in S3 never diverge.
 ### Compaction
 
 `app/services/compaction.py` + `app/compaction_worker.py` — a separate process
-independent of Postgres, which periodically lists `ops/{driveId}/`, glues
-contiguous ranges into `ops-batches/{driveId}/batch-{from}-{to}.bin` and
-deletes the original chunks:
+which periodically lists `ops/{driveId}/`, glues contiguous ranges into
+`ops-batches/{driveId}/batch-{from}-{to}.bin` and deletes the original chunks.
+Every one of a drive's storage targets holds its own copy of `ops/` (the
+fan-out write), so this is done **per target**: each `ACTIVE`/`PROVISIONING`
+target of each drive is compacted independently, through that target's own S3
+connection. An unreachable target is logged and skipped (retried on the next
+pass) and never holds up the others. The worker needs Postgres only to find the
+targets and their connection details (`drive_storage_targets`); the compaction
+itself touches nothing but S3:
 
 ```bash
-python -m app.compaction_worker                       # one pass over all drives
+python -m app.compaction_worker                       # one pass over all drives and targets
 python -m app.compaction_worker --loop                # an endless loop
 python -m app.compaction_worker --loop --interval 900 # once every 15 minutes
 ```
@@ -297,10 +303,12 @@ python -m app.compaction_worker --loop --interval 900 # once every 15 minutes
 Safe to crash at any point: the new batch object is written **before** the
 original chunks are deleted, so an interruption between these two steps leaves
 the range covered twice (not lost); the next pass finds and cleans up such
-doubled chunks without re-batching anything. `reconstruct_ops_from_backup()` in
-the same module restores the operation log from S3 alone (both prefixes,
-`ops/` and `ops-batches/`, with deduplication of overlaps) — the drive recovery
-after a loss of Postgres would work the same way.
+doubled chunks without re-batching anything. `reconstruct_ops_from_backup(target,
+drive_id)` in the same module restores the operation log from S3 alone (both
+prefixes, `ops/` and `ops-batches/`, with deduplication of overlaps) from the
+target you pass in — normally the drive's master, since reads always go there.
+It does not need Postgres, so it is also the shape of a recovery after a loss of
+Postgres, where you supply the master's connection details yourself.
 
 **Running in docker-compose** (locally/staging, without a dedicated Dockerfile
 for the worker — the `python:3.12-slim` image mounts the code and installs
@@ -321,10 +329,10 @@ docker compose logs -f compaction-worker
 
 ### Backfill of new slave targets
 
-`app/services/backfill.py` + `app/backfill_worker.py` — unlike compaction, this
-worker needs Postgres (`drive_storage_targets`, to know which target is
-`PROVISIONING`, and to resolve the credentials of the master and of the target
-itself). Each pass finds all `PROVISIONING` rows across all drives and for each
+`app/services/backfill.py` + `app/backfill_worker.py` — like the compaction
+worker, this one needs Postgres (`drive_storage_targets`, to know which target
+is `PROVISIONING`, and to resolve the credentials of the master and of the
+target itself). Each pass finds all `PROVISIONING` rows across all drives and for each
 copies from the master the current backlog — the data blocks (`data/`), the
 operation log backup (`ops/`, `ops-batches/`) and the drive recovery record
 (`drives/{driveId}/meta.json` — it is written only once when the drive is
@@ -348,8 +356,8 @@ python -m app.backfill_worker --loop                # an endless loop
 python -m app.backfill_worker --loop --interval 60  # once a minute
 ```
 
-`docker compose --profile backfill up -d backfill-worker` — similar to
-compaction, but it needs Postgres too, not only S3.
+`docker compose --profile backfill up -d backfill-worker` — the same way as
+compaction.
 
 The progress of a specific backfill is visible through
 `GET /drives/{driveId}/storage-targets` — while the target is `PROVISIONING`,

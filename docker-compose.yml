@@ -22,9 +22,10 @@ services:
     volumes:
       - minio_data:/data
 
-  # Optional: periodic ops/ -> ops-batches/ compaction (see README).
-  # Not started by a plain `docker compose up -d` — needs the "compaction"
-  # profile: `docker compose --profile compaction up -d`.
+  # Optional: periodic ops/ -> ops-batches/ compaction on every storage target
+  # of every drive (see README). Needs Postgres to find the targets. Not started
+  # by a plain `docker compose up -d` — needs the "compaction" profile:
+  # `docker compose --profile compaction up -d`.
   compaction-worker:
     image: python:3.12-slim
     profiles: ["compaction"]
@@ -36,9 +37,10 @@ services:
     command: sh -c "pip install --quiet -r requirements.txt && python -m app.compaction_worker --loop --interval 900"
     depends_on:
       - minio
+      - postgres
 
   # Optional: backfills newly added slave storage targets (see README and
-  # owload-docs/epics/0013-s3-target-backfill-worker). Needs Postgres, unlike
+  # owload-docs/epics/0013-s3-target-backfill-worker). Needs Postgres, like
   # compaction-worker. Not started by a plain `docker compose up -d` —
   # needs the "backfill" profile: `docker compose --profile backfill up -d`.
   backfill-worker:

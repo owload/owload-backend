@@ -1,19 +1,22 @@
-"""Runs the ops/ -> ops-batches/ compaction pass (see app/services/compaction.py).
+"""Runs the ops/ -> ops-batches/ compaction pass (see app/services/compaction.py)
+on every storage target of every drive.
 
 Usage:
     python -m app.compaction_worker                       # single pass, then exit
     python -m app.compaction_worker --loop                # repeats forever
     python -m app.compaction_worker --loop --interval 900  # every 15 minutes
 
-Standalone by design: touches only S3, no Postgres/FastAPI dependency, so it
-can run as a plain cron job or a small long-lived worker container next to
-the API.
+Needs Postgres: drive_storage_targets tells it which S3 targets each drive has
+and how to connect to them (like app/backfill_worker.py). The compaction work
+itself only touches S3, so it can run as a plain cron job or a small
+long-lived worker container next to the API.
 """
 
 import argparse
 import asyncio
 import logging
 
+from app.db.session import async_session_factory
 from app.services.compaction import get_compaction_service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -22,18 +25,19 @@ logger = logging.getLogger("compaction_worker")
 
 async def run_once() -> None:
     service = get_compaction_service()
-    results = await service.compact_all_drives()
+    async with async_session_factory() as db:
+        results = await service.compact_all_drives(db)
     batched = sum(r["batched_chunks"] for r in results)
     cleaned = sum(r["cleaned_up"] for r in results)
     logger.info(
-        "compaction pass done: %d drive(s) scanned, %d chunk(s) merged, %d leftover object(s) cleaned",
+        "compaction pass done: %d (drive, target) pair(s) scanned, %d chunk(s) merged, %d leftover object(s) cleaned",
         len(results),
         batched,
         cleaned,
     )
     for r in results:
         if r["batched_chunks"] or r["cleaned_up"]:
-            logger.info("  drive %s: %s", r["drive_id"], r)
+            logger.info("  drive %s target %s: %s", r["drive_id"], r["target_id"], r)
 
 
 async def main() -> None:
