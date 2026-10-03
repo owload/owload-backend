@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: owl
+      POSTGRES_PASSWORD: owl
+      POSTGRES_DB: owl
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  # Optional: periodic ops/ -> ops-batches/ compaction (see README).
+  # Not started by a plain `docker compose up -d` — needs the "compaction"
+  # profile: `docker compose --profile compaction up -d`.
+  compaction-worker:
+    image: python:3.12-slim
+    profiles: ["compaction"]
+    working_dir: /app
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    command: sh -c "pip install --quiet -r requirements.txt && python -m app.compaction_worker --loop --interval 900"
+    depends_on:
+      - minio
+
+  # Optional: backfills newly added slave storage targets (see README and
+  # owload-docs/epics/0013-s3-target-backfill-worker). Needs Postgres, unlike
+  # compaction-worker. Not started by a plain `docker compose up -d` —
+  # needs the "backfill" profile: `docker compose --profile backfill up -d`.
+  backfill-worker:
+    image: python:3.12-slim
+    profiles: ["backfill"]
+    working_dir: /app
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    command: sh -c "pip install --quiet -r requirements.txt && python -m app.backfill_worker --loop --interval 60"
+    depends_on:
+      - minio
+      - postgres
+
+volumes:
+  postgres_data:
+  minio_data:
