@@ -145,6 +145,30 @@ else requires `x-access-token`.
   — the data on the unreachable target may remain (a deliberate, logged risk,
   not a suppressed error)
 
+### Restoring drives from an S3 bucket
+
+A rescue path for drives whose Postgres row is gone while the bucket survives
+(`owload-docs/decisions/0017`, epic 0022). Both bodies carry `customConfig`
+(`endpointUrl`, `region`, `bucket`, `accessKey`, `secretKey`, `useSsl`); presets are
+not accepted.
+
+- `POST /drives/restore/scan` →
+  `{drives: [{driveId, title, createdTimestamp, opsBytes, status, reason}], truncated}`;
+  `status` is `RESTORABLE`, `ALREADY_EXISTS` (any owner, any storage — the owner is
+  never revealed) or `DAMAGED` (`reason`: `META_MISSING`, `META_INVALID`, `OPS_GAP`,
+  `OPS_TOO_LARGE`). At most 100 drives per scan. Writes nothing.
+- `POST /drives/restore` with `{customConfig, driveIds}` (1–20) →
+  `{results: [{driveId, status, reason}]}`, `status` `RESTORED`, `ALREADY_EXISTS`,
+  `DAMAGED`, `NOT_FOUND` or `FAILED`. The drive keeps its id, nonces and creation
+  time; the caller becomes the owner and the ACL is empty; `ops_data` is rebuilt from
+  `ops/` + `ops-batches/` (must be gap-free from 0) and `data_length` from the last
+  data block; the connection becomes the drive's only (main) target.
+- A bucket that cannot be read: `502`
+  `{code: "STORAGE_CONNECTION_FAILED", message, reason}` with the same fixed reasons as
+  the write errors and no endpoint, bucket or raw error text.
+- There is no "restore under a new id": the copy would share nonces with the original
+  (keystream reuse). Add the bucket as a secondary storage of the existing drive instead.
+
 ### Managing a drive's S3 targets
 - `GET /drives/{driveId}/storage-targets` — the list of the drive's targets
   (`{id, role, status, tier, presetId?, presetLabel?, isCustom,

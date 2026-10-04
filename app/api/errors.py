@@ -33,3 +33,26 @@ def storage_write_failed(exc: BlockWriteError) -> HTTPException:
             "rolledBack": exc.rolled_back,
         },
     )
+
+
+STORAGE_CONNECTION_FAILED = "STORAGE_CONNECTION_FAILED"
+
+_CONNECTION_FAILED_MESSAGES = {
+    "UNREACHABLE": "The storage is not reachable or is not responding.",
+    "ACCESS_DENIED": "The storage refused the access key and secret key.",
+    "BUCKET_NOT_FOUND": "The bucket was not found on this storage.",
+}
+
+
+def storage_connection_failed(reason: str) -> HTTPException:
+    """502 for a storage the caller supplied the connection for (restoring drives,
+    owload-docs/epics/0022) that could not be read. Same fixed reasons as the write
+    errors; the endpoint, bucket and the raw exception are never echoed back."""
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail={
+            "code": STORAGE_CONNECTION_FAILED,
+            "message": _CONNECTION_FAILED_MESSAGES.get(reason, "The storage could not be read."),
+            "reason": reason,
+        },
+    )

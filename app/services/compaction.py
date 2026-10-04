@@ -150,6 +150,17 @@ class OpsCompactionService:
         return results
 
 
+async def list_ops_ranges(client, bucket: str, drive_id: str) -> list[_Range]:
+    """Every ops/ chunk and ops-batches/ batch of a drive on one storage, as
+    ranges ordered by start offset (longest first on ties). The ranges may
+    overlap — a crashed compaction leaves bytes covered twice — and may have
+    gaps; the caller decides what to do about either."""
+    service = OpsCompactionService()
+    chunks = await service._list_ranges(client, bucket, f"ops/{drive_id}/", _CHUNK_KEY_RE)
+    batches = await service._list_ranges(client, bucket, f"ops-batches/{drive_id}/", _BATCH_KEY_RE)
+    return sorted(chunks + batches, key=lambda r: (r.from_offset, -r.to_offset))
+
+
 async def reconstruct_ops_from_backup(target: ResolvedTarget, drive_id: str) -> bytes:
     """Rebuilds a drive's full ops log purely from the S3 recovery backup
     held by `target` (both ops/ and ops-batches/ prefixes), deduplicating any

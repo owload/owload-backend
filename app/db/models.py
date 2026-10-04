@@ -101,6 +101,7 @@ class DriveAction:
     owload-docs/decisions/0003 and owload-docs/decisions/0008."""
 
     CREATE_DRIVE = "CREATE_DRIVE"
+    RESTORE_DRIVE = "RESTORE_DRIVE"
     START_SESSION = "START_SESSION"
     FINALIZE_SESSION = "FINALIZE_SESSION"
     SAVE_OP = "SAVE_OP"
