@@ -22,6 +22,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_private_network=settings.cors_allow_private_network,
 )
 
 # No shared prefix: each router's own prefix matches the frontend's REST paths.

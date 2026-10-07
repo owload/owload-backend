@@ -24,6 +24,9 @@ class Settings(BaseSettings):
 
     # CORS
     cors_allow_origins: list[str] = ["http://localhost:5173"]
+    # Answer Chrome's private-network preflight (a page from one local address calling the API on another).
+    # Off by default; only the listed origins are ever allowed. Turn it on for local development.
+    cors_allow_private_network: bool = False
 
     # Infra-secret encryption (S3 credentials in s3_presets/drive_storage_targets.custom_config)
     # — a backend-only Fernet key, unrelated to the client's data-encryption key.
