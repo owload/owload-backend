@@ -1,4 +1,27 @@
-from pydantic import BaseModel, ConfigDict, Field
+from datetime import datetime
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+
+
+# The preset pictures of the profile; the client draws them. Keep in step with owload-front
+# (src/components/profile/avatar-presets.tsx). The initials of the user's name are the default (kind "default"), not a preset.
+AVATAR_PRESETS = (
+    "rings", "arcs", "split", "stripes", "dots", "waves", "cipher", "peaks", "keyhole", "moon", "bars",
+)
+
+# The largest file accepted as a profile picture; the server scales it down and stores a small JPEG (the client scales it
+# first, so a normal upload is a few kilobytes).
+AVATAR_UPLOAD_MAX_BYTES = 10 * 1024 * 1024
+
+
+class AvatarOut(BaseModel):
+    """`default`: nothing chosen, the client shows the initials of the name. `preset`: one of AVATAR_PRESETS. `upload`: the
+    user's image, fetched from GET /userinfo/avatar; `version` changes with every upload (for the cache)."""
+
+    kind: Literal["default", "preset", "upload"]
+    preset: str | None = None
+    version: int | None = None
 
 
 class UserBasicInfoOut(BaseModel):
@@ -10,7 +33,23 @@ class UserBasicInfoOut(BaseModel):
     user_id: str = Field(alias="userId")
     email: str
     name: str
+    avatar: AvatarOut = AvatarOut(kind="default")
+    # When the user first signed in to Owload (the profile is created on the first call); only the signed-in user's profile has it.
+    member_since: datetime | None = Field(default=None, alias="memberSince")
+
+
+class SetAvatarPresetIn(BaseModel):
+    preset: str
+
+    @field_validator("preset")
+    @classmethod
+    def _known_preset(cls, value: str) -> str:
+        if value not in AVATAR_PRESETS:
+            raise ValueError("Unknown preset")
+        return value
 
 
 class SaveUserBasicInfoIn(BaseModel):
-    name: str
+    """Only the name can be changed; the email always comes from the sign-in token. An empty name clears it."""
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=255)]

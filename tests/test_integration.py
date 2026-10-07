@@ -5,6 +5,7 @@ Skips automatically if the database isn't reachable (e.g. docker compose not up)
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import aioboto3
 import pytest
@@ -88,23 +89,114 @@ async def client_as():
     app.dependency_overrides.pop(get_current_user, None)
 
 
+DEFAULT_AVATAR = {"kind": "default", "preset": None, "version": None}
+
+
 async def test_userinfo_lifecycle(client_as):
     user = CurrentUser(sub=f"u-{uuid.uuid4()}", username="t", email=f"{uuid.uuid4()}@example.com")
     async with client_as(user) as c:
+        # The profile is created on the first call; after a plain registration the token has no name.
         resp = await c.get("/userinfo")
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        body = resp.json()
+        member_since = datetime.fromisoformat(body.pop("memberSince"))
+        assert abs(datetime.now(timezone.utc) - member_since) < timedelta(minutes=5)
+        assert body == {"userId": user.sub, "email": user.email, "name": "", "avatar": DEFAULT_AVATAR}
 
-        resp = await c.post("/userinfo", json={"name": "Test User"})
+        resp = await c.post("/userinfo", json={"name": "  Test User  "})
         assert resp.status_code == 204
 
         resp = await c.get("/userinfo")
         assert resp.status_code == 200
         body = resp.json()
-        assert body == {"userId": user.sub, "email": user.email, "name": "Test User"}
+        body.pop("memberSince")
+        assert body == {"userId": user.sub, "email": user.email, "name": "Test User", "avatar": DEFAULT_AVATAR}
 
         resp = await c.get(f"/userinfo/search/{user.email}")
         assert resp.status_code == 200
         assert [u["userId"] for u in resp.json()] == [user.sub]
+
+
+async def test_userinfo_name_comes_from_the_identity_provider_and_email_cannot_be_changed(client_as):
+    """The name is taken from the token (Google, SSO) while the stored name is empty and never overwrites a name the
+    user set; the email always follows the token and the request cannot change it."""
+    sub = f"u-{uuid.uuid4()}"
+    email = f"{uuid.uuid4()}@example.com"
+    sso = CurrentUser(sub=sub, username="t", email=email, name="Alex Morgan")
+    async with client_as(sso) as c:
+        resp = await c.get("/userinfo")
+        assert resp.json()["name"] == "Alex Morgan"
+
+        resp = await c.post("/userinfo", json={"name": "Alex M.", "email": "other@example.com"})
+        assert resp.status_code == 204
+
+    # The next sign-in carries the provider's name again, and a new address.
+    later = CurrentUser(sub=sub, username="t", email=f"new-{email}", name="Alex Morgan")
+    async with client_as(later) as c:
+        body = (await c.get("/userinfo")).json()
+        assert body["name"] == "Alex M."
+        assert body["email"] == f"new-{email}"
+
+        # An empty name clears it; the next sign-in fills it from the provider again.
+        assert (await c.post("/userinfo", json={"name": ""})).status_code == 204
+        assert (await c.get("/userinfo")).json()["name"] == "Alex Morgan"
+
+        assert (await c.post("/userinfo", json={"name": "x" * 256})).status_code == 422
+
+
+def _picture(width: int, height: int, fmt: str = "PNG", mode: str = "RGB") -> bytes:
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new(mode, (width, height)).save(out, format=fmt)
+    return out.getvalue()
+
+
+async def test_userinfo_avatar(client_as):
+    """The picture of the profile: a default until chosen, then a preset or an uploaded image that the server scales down
+    to a small square JPEG; a bad or oversized file is refused."""
+    import io
+
+    from PIL import Image
+
+    user = CurrentUser(sub=f"u-{uuid.uuid4()}", username="t", email=f"{uuid.uuid4()}@example.com")
+    async with client_as(user) as c:
+        assert (await c.get("/userinfo")).json()["avatar"] == DEFAULT_AVATAR
+        assert (await c.get("/userinfo/avatar")).status_code == 404
+
+        assert (await c.put("/userinfo/avatar/preset", json={"preset": "rings"})).status_code == 204
+        assert (await c.get("/userinfo")).json()["avatar"] == {"kind": "preset", "preset": "rings", "version": None}
+        assert (await c.put("/userinfo/avatar/preset", json={"preset": "sunny"})).status_code == 422
+
+        # A wide photo is cropped to a square and scaled down; the stored picture is always a 256 px JPEG.
+        assert (await c.put("/userinfo/avatar/image", content=_picture(1200, 600))).status_code == 204
+        avatar = (await c.get("/userinfo")).json()["avatar"]
+        assert avatar["kind"] == "upload" and avatar["preset"] is None and avatar["version"]
+        resp = await c.get("/userinfo/avatar")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/jpeg"
+        assert resp.headers["x-content-type-options"] == "nosniff"
+        stored = Image.open(io.BytesIO(resp.content))
+        assert stored.format == "JPEG" and stored.size == (256, 256)
+
+        # A picture with transparency, and a WebP, are accepted too.
+        assert (await c.put("/userinfo/avatar/image", content=_picture(64, 64, "PNG", "RGBA"))).status_code == 204
+        assert (await c.put("/userinfo/avatar/image", content=_picture(300, 300, "WEBP"))).status_code == 204
+
+        # Not an image; a broken one; too many bytes; too many pixels (a small file that unpacks to a huge picture).
+        assert (await c.put("/userinfo/avatar/image", content=b"<svg onload=alert(1)>")).status_code == 415
+        assert (await c.put("/userinfo/avatar/image", content=b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)).status_code == 415
+        assert (await c.put("/userinfo/avatar/image", content=b"\xff\xd8\xff" + b"\x00" * (10 * 1024 * 1024))).status_code == 413
+        assert (await c.put("/userinfo/avatar/image", content=_picture(9000, 9000, "PNG", "1"))).status_code == 413
+        assert Image.open(io.BytesIO((await c.get("/userinfo/avatar")).content)).size == (256, 256)
+
+        # A preset replaces the upload; reset goes back to the default.
+        assert (await c.put("/userinfo/avatar/preset", json={"preset": "moon"})).status_code == 204
+        assert (await c.get("/userinfo/avatar")).status_code == 404
+        assert (await c.delete("/userinfo/avatar")).status_code == 204
+        assert (await c.get("/userinfo")).json()["avatar"]["kind"] == "default"
 
 
 async def test_delete_drive_owner_only_and_respects_custom_target_choices(client_as):

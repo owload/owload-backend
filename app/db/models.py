@@ -37,6 +37,25 @@ class User(Base):
     )
 
 
+class UserAvatar(Base):
+    """The picture of a user's profile: one of the preset pictures the client draws (`preset`), or a small image the user
+    uploaded (`image`, always a small square JPEG made by the server). A user who chose nothing has no row and the
+    client shows the initials of the name. Kept apart from `users` so the user search never loads the image bytes."""
+
+    __tablename__ = "user_avatars"
+    __table_args__ = (
+        CheckConstraint("(preset IS NULL) <> (image IS NULL)", name="ck_user_avatars_preset_xor_image"),
+    )
+
+    user_id: Mapped[str] = mapped_column(String(255), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    preset: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    image: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Drive(Base):
     """An encrypted drive: an append-only ops log plus a byte-addressable
     data area. Both are opaque ciphertext to the server — encryption/decryption
