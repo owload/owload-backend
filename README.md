@@ -54,7 +54,7 @@ query parameter) since 2026-07-13 — the frontend and the backend are in sync.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt
+pip install -r requirements-dev.txt   # the newest versions that requirements.txt allows
 
 cp .env.example .env
 # adjust KEYCLOAK_ISSUER / KEYCLOAK_AUDIENCE to your realm/client —
@@ -71,6 +71,18 @@ uvicorn app.main:app --reload
 ```
 
 Swagger UI: http://localhost:8000/docs
+
+## Dependencies
+
+`requirements.txt` says what the backend needs; `requirements.lock` pins the exact versions that the Docker image installs
+(made for Python 3.12, the version of the image). After changing `requirements.txt`, or to take newer versions, make it again:
+
+```bash
+docker run --rm -v "$PWD":/w -w /w python:3.12-slim sh -c \
+  "pip install pip-tools && pip-compile --no-header --strip-extras -o requirements.lock requirements.txt"
+```
+
+Look for known vulnerabilities with `pip-audit -r requirements.txt`.
 
 ## Tests
 

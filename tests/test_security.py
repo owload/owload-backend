@@ -1,8 +1,8 @@
+import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
-from jose import jwt
-from jose.utils import long_to_base64
+from jwt.utils import to_base64url_uint
 
 from app.core import security
 from app.core.config import Settings
@@ -15,7 +15,7 @@ KID = "test-key-1"
 
 
 def _b64(n: int) -> str:
-    return long_to_base64(n).decode()
+    return to_base64url_uint(n).decode()
 
 
 @pytest.fixture
@@ -108,3 +108,49 @@ async def test_expired_token_is_rejected(monkeypatch, rsa_keypair):
     with pytest.raises(HTTPException) as exc_info:
         await security.get_current_user(token, Settings(keycloak_issuer=ISSUER, keycloak_audience=AUDIENCE))
     assert exc_info.value.status_code == 401
+
+
+async def test_token_signed_with_the_public_key_as_a_shared_secret_is_rejected(monkeypatch, rsa_keypair):
+    """Algorithm confusion: the key set is public, so a forged HS256 token "signed" with it must not pass."""
+    _, jwk_dict = rsa_keypair
+    await _patch_jwks(monkeypatch, jwk_dict)
+    forged = jwt.encode(
+        {"sub": "attacker", "iss": ISSUER, "aud": AUDIENCE, "exp": 9999999999},
+        _b64(int(1)) * 40,  # whatever bytes an attacker derives from the public key
+        algorithm="HS256",
+        headers={"kid": KID},
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await security.get_current_user(forged, Settings(keycloak_issuer=ISSUER, keycloak_audience=AUDIENCE))
+    assert exc_info.value.status_code == 401
+
+
+async def test_unsigned_token_is_rejected(monkeypatch, rsa_keypair):
+    _, jwk_dict = rsa_keypair
+    await _patch_jwks(monkeypatch, jwk_dict)
+    unsigned = jwt.encode({"sub": "attacker", "iss": ISSUER, "aud": AUDIENCE, "exp": 9999999999}, None, algorithm="none", headers={"kid": KID})
+    with pytest.raises(HTTPException) as exc_info:
+        await security.get_current_user(unsigned, Settings(keycloak_issuer=ISSUER, keycloak_audience=AUDIENCE))
+    assert exc_info.value.status_code == 401
+
+
+async def test_wrong_issuer_and_missing_subject_are_rejected(monkeypatch, rsa_keypair):
+    private_key, jwk_dict = rsa_keypair
+    await _patch_jwks(monkeypatch, jwk_dict)
+    for claims in (
+        {"sub": "u", "iss": "https://evil.example.com/realms/test", "aud": AUDIENCE, "exp": 9999999999},
+        {"iss": ISSUER, "aud": AUDIENCE, "exp": 9999999999},
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await security.get_current_user(_make_token(private_key, claims), Settings(keycloak_issuer=ISSUER, keycloak_audience=AUDIENCE))
+        assert exc_info.value.status_code == 401
+
+
+async def test_session_id_comes_from_sid_or_session_state(monkeypatch, rsa_keypair):
+    private_key, jwk_dict = rsa_keypair
+    await _patch_jwks(monkeypatch, jwk_dict)
+    settings = Settings(keycloak_issuer=ISSUER, keycloak_audience=AUDIENCE)
+    base = {"sub": "u", "iss": ISSUER, "aud": [AUDIENCE, "account"], "exp": 9999999999}
+    assert (await security.get_current_user(_make_token(private_key, {**base, "sid": "s-1"}), settings)).session_id == "s-1"
+    assert (await security.get_current_user(_make_token(private_key, {**base, "session_state": "s-2"}), settings)).session_id == "s-2"
+    assert (await security.get_current_user(_make_token(private_key, base), settings)).session_id is None

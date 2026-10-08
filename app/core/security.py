@@ -2,9 +2,9 @@ import time
 from dataclasses import dataclass
 
 import httpx
+import jwt
 from fastapi import Depends, Header, HTTPException, status
-from jose import jwt
-from jose.exceptions import JOSEError
+from jwt import PyJWK, PyJWTError
 
 from app.core.config import Settings, get_settings
 
@@ -18,6 +18,11 @@ class CurrentUser:
     name: str | None = None
     # The Keycloak session the token belongs to (`sid`, or `session_state` in older tokens); one per sign-in.
     session_id: str | None = None
+
+
+_ASYMMETRIC_ALGORITHMS = frozenset({"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"})
+# How far the clocks of the backend and of Keycloak may differ (for exp, nbf and iat).
+_CLOCK_SKEW_SECONDS = 30
 
 
 class KeycloakJWKSCache:
@@ -76,15 +81,20 @@ async def get_current_user(
         if key is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unknown signing key")
 
+        algorithm = key.get("alg", "RS256")
+        if algorithm not in _ASYMMETRIC_ALGORITHMS:
+            # Only the signature of the identity provider is accepted: never a shared-secret (HS*) or unsigned token.
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unsupported signing algorithm")
         claims = jwt.decode(
             token,
-            key,
-            algorithms=[key.get("alg", "RS256")],
+            PyJWK.from_dict(key).key,
+            algorithms=[algorithm],
             audience=settings.keycloak_audience,
             issuer=settings.keycloak_issuer.rstrip("/"),
-            options={"require_exp": True, "require_sub": True},
+            options={"require": ["exp", "sub"]},
+            leeway=_CLOCK_SKEW_SECONDS,
         )
-    except JOSEError as exc:
+    except PyJWTError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"Invalid token: {exc}") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Unable to reach identity provider") from exc

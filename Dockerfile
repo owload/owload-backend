@@ -2,8 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# The exact versions the image is built with (requirements.lock, made from requirements.txt for this Python; see the README).
+COPY requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
 
 COPY . .
 
