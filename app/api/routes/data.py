@@ -12,8 +12,20 @@ from app.core.security import CurrentUser, get_current_user
 from app.db.models import DriveAction, UploadSession
 from app.db.session import get_db
 from app.schemas.data_range import DataRangeOut
+from app.services.activity import (
+    DRIVE_FILES_READ,
+    DRIVE_WRITTEN,
+    ClientContext,
+    get_client_context,
+    note_drive_activity,
+)
 from app.services.audit import log_action
-from app.services.storage import BlockDeleteError, BlockStorage, BlockWriteError, get_storage
+from app.services.storage import (
+    BlockDeleteError,
+    BlockStorage,
+    BlockWriteError,
+    get_storage,
+)
 from app.services.storage_targets import get_active_targets, get_master
 
 router = APIRouter(prefix="/data", tags=["data"])
@@ -27,11 +39,12 @@ async def save_data_block(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     storage: BlockStorage = Depends(get_storage),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
     session = await db.get(UploadSession, session_id)
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    await get_accessible_drive_or_404(db, session.drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, session.drive_id, user.sub)
     targets = await get_active_targets(db, session.drive_id)
 
     body = await request.body()
@@ -44,6 +57,7 @@ async def save_data_block(
     except BlockWriteError as exc:
         raise storage_write_failed(exc) from exc
     session.last_write_at = datetime.now(UTC)
+    await note_drive_activity(db, user, session.drive_id, drive.title, DRIVE_WRITTEN, ctx)
     await db.commit()
 
 
@@ -69,11 +83,13 @@ async def get_data_block(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     storage: BlockStorage = Depends(get_storage),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> StreamingResponse:
     if end < start:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end must be >= start")
 
     drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
+    await note_drive_activity(db, user, drive_id, drive.title, DRIVE_FILES_READ, ctx, commit=True)
     available = max(0, drive.data_length - start)
     length = min(end - start, available)
 
@@ -92,6 +108,7 @@ async def free_data_range(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     storage: BlockStorage = Depends(get_storage),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
     """Called when a client-side file occupying [start, end) is deleted.
     Only frees storage blocks that fall entirely within the range (i.e. are
@@ -100,7 +117,7 @@ async def free_data_range(
     if end < start:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end must be >= start")
 
-    await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
     targets = await get_active_targets(db, drive_id)
     try:
         blocks_deleted = await storage.free_range(targets, drive_id, start, end)
@@ -113,6 +130,7 @@ async def free_data_range(
         db, drive_id, user.sub, DriveAction.DELETE_DATA,
         start=start, end=end, blocks_deleted=blocks_deleted,
     )
+    await note_drive_activity(db, user, drive_id, drive.title, DRIVE_WRITTEN, ctx)
     await db.commit()
 
 

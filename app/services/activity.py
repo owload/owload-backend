@@ -30,12 +30,24 @@ PICTURE_CHANGED = "picture_changed"
 DRIVE_CREATED = "drive_created"
 DRIVE_RESTORED = "drive_restored"
 DRIVE_DELETED = "drive_deleted"
+# Access to a drive, squashed into bursts (see note_drive_activity).
+DRIVE_OPENED = "drive_opened"
+DRIVE_FILES_READ = "drive_files_read"
+DRIVE_WRITTEN = "drive_written"
+STORAGE_TARGET_ADDED = "storage_target_added"
+STORAGE_TARGET_MAIN_CHANGED = "storage_target_main_changed"
+STORAGE_TARGET_REMOVED = "storage_target_removed"
 
 SEEN_WRITE_INTERVAL = timedelta(seconds=60)
 NEW_VISIT_GAP = timedelta(minutes=30)
 # A session that has not been seen for this long is no longer listed as signed in.
 SESSION_LIST_WINDOW = timedelta(days=30)
 SESSION_KEEP = timedelta(days=90)
+# Drive access is recorded once per burst: while a user keeps reading or writing the same drive from the same session with gaps
+# shorter than BURST_GAP it is one event, whose `lastAt` moves on. Between two looks at the database there are at least
+# DRIVE_NOTE_INTERVAL seconds, so a stream of requests (the ranges of a video, the blocks of an upload) costs nothing.
+BURST_GAP = timedelta(minutes=15)
+DRIVE_NOTE_INTERVAL = 30.0
 
 
 @dataclass(frozen=True)
@@ -156,6 +168,53 @@ async def touch_session(db: AsyncSession, user: CurrentUser, ctx: ClientContext,
     if changed:
         await db.commit()
     return row.prev_seen_at
+
+
+_recent_drive_notes: dict[tuple[str, str, str], float] = {}
+
+
+async def note_drive_activity(
+    db: AsyncSession, user: CurrentUser, drive_id, title: str, kind: str, ctx: ClientContext, *, commit: bool = False
+) -> None:
+    """Notes that the user read or wrote the drive (`kind`: opened, read files, wrote), without saying what: one event per burst of
+    such requests from one session. Nothing is sent by the client: the backend sees the requests it serves anyway.
+
+    A write route stages the event in its own transaction and commits as it always did; a read route has nothing else to commit,
+    so it passes `commit=True`."""
+    key = (user.sub, str(drive_id), kind)
+    moment = time.monotonic()
+    last_look = _recent_drive_notes.get(key)
+    if last_look is not None and moment - last_look < DRIVE_NOTE_INTERVAL:
+        return
+    if len(_recent_drive_notes) > 10_000:
+        _recent_drive_notes.clear()
+    _recent_drive_notes[key] = moment
+
+    now = datetime.now(timezone.utc)
+    session_id = session_key(user, ctx)
+    latest = await db.scalar(
+        select(UserEvent)
+        .where(
+            UserEvent.user_id == user.sub,
+            UserEvent.kind == kind,
+            UserEvent.session_id == session_id,
+            UserEvent.details["driveId"].astext == str(drive_id),
+        )
+        .order_by(UserEvent.id.desc())
+        .limit(1)
+    )
+    last_at = None
+    if latest is not None:
+        try:
+            last_at = datetime.fromisoformat(str(latest.details.get("lastAt")))
+        except ValueError:
+            last_at = None
+    if latest is not None and last_at is not None and now - last_at < BURST_GAP:
+        latest.details = {**latest.details, "lastAt": now.isoformat(), "title": title}
+    else:
+        record_event(db, user.sub, kind, ctx, session_id=session_id, driveId=str(drive_id), title=title, lastAt=now.isoformat())
+    if commit:
+        await db.commit()
 
 
 _revoked_cache: dict[str, tuple[float, bool]] = {}

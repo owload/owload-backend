@@ -9,6 +9,13 @@ from app.api.errors import storage_write_failed
 from app.core.security import CurrentUser, get_current_user
 from app.db.models import Drive, DriveAction
 from app.db.session import get_db
+from app.services.activity import (
+    DRIVE_OPENED,
+    DRIVE_WRITTEN,
+    ClientContext,
+    get_client_context,
+    note_drive_activity,
+)
 from app.services.audit import log_action
 from app.services.storage import BlockStorage, BlockWriteError, get_storage
 from app.services.storage_targets import get_active_targets
@@ -22,11 +29,13 @@ async def get_operations(
     start_byte_pos: int,
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> Response:
     if start_byte_pos < 0:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "startBytePos must not be negative")
     drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
     data = bytes(drive.ops_data[start_byte_pos:])
+    await note_drive_activity(db, user, drive_id, drive.title, DRIVE_OPENED, ctx, commit=True)
 
     return Response(content=data, media_type="application/octet-stream")
 
@@ -38,6 +47,7 @@ async def save_operation(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     storage: BlockStorage = Depends(get_storage),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
     # Invariant relied on by the frontend: owload-front's DriveLogs correlates
     # this call's SAVE_OP audit-log entry with an FsOperationWrapper by matching
@@ -47,7 +57,7 @@ async def save_operation(
     # many-operations-per-call (e.g. batching for fewer round trips), the
     # correlation formula on the frontend breaks silently — coordinate any
     # change here with owload-docs/epics/0004-drive-logs-technical-debt/tasks/0003.
-    await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
     targets = await get_active_targets(db, drive_id)
     chunk = await request.body()
 
@@ -71,4 +81,5 @@ async def save_operation(
         raise storage_write_failed(exc) from exc
 
     log_action(db, drive_id, user.sub, DriveAction.SAVE_OP, start=start, end=new_length)
+    await note_drive_activity(db, user, drive_id, drive.title, DRIVE_WRITTEN, ctx)
     await db.commit()

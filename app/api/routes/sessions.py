@@ -9,6 +9,12 @@ from app.core.security import CurrentUser, get_current_user
 from app.db.models import Drive, DriveAction, SessionStatus, UploadSession
 from app.db.session import get_db
 from app.schemas.session import SessionInfoOut
+from app.services.activity import (
+    DRIVE_WRITTEN,
+    ClientContext,
+    get_client_context,
+    note_drive_activity,
+)
 from app.services.audit import log_action
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -32,8 +38,9 @@ async def start_upload_session(
     byte_length: int = Query(..., alias="byteLength", ge=0),
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> SessionInfoOut:
-    await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
 
     # Atomically reserve [old data_length, old data_length + byte_length) for this session.
     result = await db.execute(
@@ -58,6 +65,7 @@ async def start_upload_session(
         db, drive_id, user.sub, DriveAction.START_SESSION,
         session_id=str(session.id), start=byte_offset, end=byte_offset + byte_length,
     )
+    await note_drive_activity(db, user, drive_id, drive.title, DRIVE_WRITTEN, ctx)
     await db.commit()
     return _to_session_info(session)
 
@@ -67,11 +75,12 @@ async def finish_upload_session(
     session_id: uuid.UUID,
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
     session = await db.get(UploadSession, session_id)
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    await get_accessible_drive_or_404(db, session.drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, session.drive_id, user.sub)
     if session.status in (SessionStatus.FINISHED, SessionStatus.STALE):
         raise HTTPException(status.HTTP_409_CONFLICT, "Session is closed")
 
@@ -80,4 +89,5 @@ async def finish_upload_session(
         db, session.drive_id, user.sub, DriveAction.FINALIZE_SESSION,
         session_id=str(session.id), start=session.byte_offset, end=session.byte_offset + session.byte_length,
     )
+    await note_drive_activity(db, user, session.drive_id, drive.title, DRIVE_WRITTEN, ctx)
     await db.commit()

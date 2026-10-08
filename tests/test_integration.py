@@ -289,6 +289,60 @@ async def test_activity_paging_and_signing_out_other_sessions(client_as):
         assert (await c.get("/userinfo")).status_code == 401
 
 
+async def test_drive_access_is_noted_once_per_burst(client_as, monkeypatch):
+    """Reading and writing a drive shows in the account's activity as facts (opened, read files, wrote), without saying what, and a
+    run of requests is one event: nothing is sent by the client, the backend notes the requests it serves."""
+    from app.services import activity
+
+    uid = f"u-{uuid.uuid4()}"
+    laptop = CurrentUser(sub=uid, username="t", email=f"{uid}@example.com", session_id=f"sid-{uuid.uuid4()}")
+    phone = CurrentUser(sub=uid, username="t", email=f"{uid}@example.com", session_id=f"sid-{uuid.uuid4()}")
+
+    async def facts(c):
+        items = (await c.get("/userinfo/activity", params={"limit": 100})).json()["items"]
+        return [(e["kind"], e["details"].get("driveId") == drive_id, e["sessionId"]) for e in items if e["kind"].startswith("drive_") and e["kind"] != "drive_created"]
+
+    async with client_as(laptop) as c:
+        drive_id = (await c.post("/drives", json={"title": "Burst drive", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        for _ in range(5):
+            assert (await c.get(f"/ops/{drive_id}/0")).status_code == 200
+        for _ in range(3):
+            assert (await c.post(f"/ops/{drive_id}", content=b"op")).status_code == 204
+        session = (await c.post("/sessions", params={"driveId": drive_id, "byteLength": 4})).json()
+        assert (await c.post("/data", params={"sessionId": session["sessionId"], "start": 0}, content=b"data")).status_code == 204
+        assert (await c.get("/data", params={"driveId": drive_id, "start": 0, "end": 4})).content == b"data"
+        assert (await c.get("/data", params={"driveId": drive_id, "start": 0, "end": 4})).content == b"data"
+
+        # One event of each kind, however many requests: five opens, four writes (ops, start, data), two reads.
+        assert sorted(await facts(c)) == sorted([
+            ("drive_opened", True, laptop.session_id), ("drive_written", True, laptop.session_id), ("drive_files_read", True, laptop.session_id),
+        ])
+        # They say which drive, not what was done.
+        events = (await c.get("/userinfo/activity", params={"kind": "drive_written"})).json()["items"]
+        assert set(events[0]["details"]) == {"driveId", "title", "lastAt"}
+
+        # A later request of the same burst moves `lastAt` on; it does not add an event.
+        monkeypatch.setattr(activity, "DRIVE_NOTE_INTERVAL", 0.0)
+        before = events[0]["details"]["lastAt"]
+        assert (await c.post(f"/ops/{drive_id}", content=b"op")).status_code == 204
+        events = (await c.get("/userinfo/activity", params={"kind": "drive_written"})).json()["items"]
+        assert len([e for e in events if e["details"]["driveId"] == drive_id]) == 1
+        assert events[0]["details"]["lastAt"] > before
+
+        # After a pause longer than the gap, it is a new burst.
+        monkeypatch.setattr(activity, "BURST_GAP", timedelta(0))
+        assert (await c.post(f"/ops/{drive_id}", content=b"op")).status_code == 204
+        events = (await c.get("/userinfo/activity", params={"kind": "drive_written"})).json()["items"]
+        assert len([e for e in events if e["details"]["driveId"] == drive_id]) == 2
+
+    monkeypatch.setattr(activity, "BURST_GAP", timedelta(minutes=15))
+    async with client_as(phone) as c:
+        # Another session is another event.
+        assert (await c.get(f"/ops/{drive_id}/0")).status_code == 200
+        opened = [e for e in (await c.get("/userinfo/activity", params={"kind": "drive_opened"})).json()["items"] if e["details"]["driveId"] == drive_id]
+        assert {e["sessionId"] for e in opened} == {laptop.session_id, phone.session_id}
+
+
 async def test_delete_drive_owner_only_and_respects_custom_target_choices(client_as):
     """Epic 0015 task 0001: DELETE /drives/{driveId} — owner only (403 for
     an ACL member, 404 for a total stranger, matching decisions/0013's
@@ -1127,6 +1181,14 @@ async def test_storage_target_lifecycle_add_promote_and_remove(client_as):
     async with client_as(USER_A) as c:
         resp = await c.patch(f"{base}/{hot_target['id']}/make-master")
         assert resp.status_code == 204
+
+        # The changes of the drive's storages are in the account's activity, newest first.
+        events = (await c.get("/userinfo/activity", params={"limit": 100})).json()["items"]
+        mine = [e["kind"] for e in events if e["details"].get("driveId") == drive_id]
+        assert mine == [
+            "storage_target_main_changed", "storage_target_removed",
+            "storage_target_added", "storage_target_added", "drive_written", "drive_created",
+        ]
 
     async with async_session_factory() as db:
         roles = {

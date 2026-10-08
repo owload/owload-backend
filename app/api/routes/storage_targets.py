@@ -8,10 +8,29 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_accessible_drive_or_404
 from app.core.security import CurrentUser, get_current_user
-from app.db.models import DriveStorageTarget, S3Preset, S3Tier, StorageTargetRole, StorageTargetStatus
+from app.db.models import (
+    DriveStorageTarget,
+    S3Preset,
+    S3Tier,
+    StorageTargetRole,
+    StorageTargetStatus,
+)
 from app.db.session import get_db
 from app.schemas.drive import CustomStorageConfigIn
-from app.schemas.storage_target import AddStorageTargetIn, ConnectionTestOut, StorageTargetOut
+from app.schemas.storage_target import (
+    AddStorageTargetIn,
+    ConnectionTestOut,
+    StorageTargetOut,
+)
+from app.services.activity import (
+    STORAGE_TARGET_ADDED,
+    STORAGE_TARGET_MAIN_CHANGED,
+    STORAGE_TARGET_REMOVED,
+    ClientContext,
+    get_client_context,
+    record_event,
+    session_key,
+)
 from app.services.backfill import BackfillService, get_backfill_service
 from app.services.secrets import encrypt_secret
 from app.services.storage import BlockStorage, get_storage
@@ -116,6 +135,7 @@ async def add_storage_target(
     payload: AddStorageTargetIn,
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> StorageTargetOut:
     """Adds a slave target. It's already included in fan-out writes from
     this point on (see get_active_targets) regardless of status — copying
@@ -190,6 +210,10 @@ async def add_storage_target(
         )
 
     db.add(target)
+    record_event(
+        db, user.sub, STORAGE_TARGET_ADDED, ctx, session_id=session_key(user, ctx),
+        driveId=str(drive_id), title=drive.title,
+    )
     await db.commit()
     target = await _get_target_or_404(db, drive_id, target.id)
     return _to_target_out(target)
@@ -242,12 +266,13 @@ async def make_master(
     target_id: uuid.UUID,
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
     """Reassigning master is just swapping which row has role=MASTER — every
     ACTIVE/PROVISIONING target already receives every write via fan-out
     (owload-docs/decisions/0011), so no data needs to move and no active upload
     session needs to be paused."""
-    await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
     target = await _get_target_or_404(db, drive_id, target_id)
 
     if target.role == StorageTargetRole.MASTER:
@@ -267,6 +292,10 @@ async def make_master(
     ).scalar_one()
     current_master.role = StorageTargetRole.SLAVE
     target.role = StorageTargetRole.MASTER
+    record_event(
+        db, user.sub, STORAGE_TARGET_MAIN_CHANGED, ctx, session_id=session_key(user, ctx),
+        driveId=str(drive_id), title=drive.title,
+    )
     await db.commit()
 
 
@@ -283,8 +312,9 @@ async def remove_storage_target(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     storage: BlockStorage = Depends(get_storage),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
-    await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
     target = await _get_target_or_404(db, drive_id, target_id)
 
     if target.role == StorageTargetRole.MASTER:
@@ -323,4 +353,8 @@ async def remove_storage_target(
         )
 
     await db.delete(target)
+    record_event(
+        db, user.sub, STORAGE_TARGET_REMOVED, ctx, session_id=session_key(user, ctx),
+        driveId=str(drive_id), title=drive.title,
+    )
     await db.commit()
