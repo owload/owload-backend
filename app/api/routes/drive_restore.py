@@ -29,6 +29,13 @@ from app.schemas.drive_restore import (
     RestoreScanIn,
     RestoreScanOut,
 )
+from app.services.activity import (
+    DRIVE_RESTORED,
+    ClientContext,
+    get_client_context,
+    record_event,
+    session_key,
+)
 from app.services.audit import log_action
 from app.services.restore import (
     DamageReason,
@@ -122,6 +129,7 @@ async def _restore_one(
     found: FoundDrive,
     ops_data: bytes,
     data_length: int,
+    ctx: ClientContext,
 ) -> None:
     meta = found.meta
     assert meta is not None
@@ -155,6 +163,7 @@ async def _restore_one(
         )
     )
     log_action(db, meta.drive_id, user.sub, DriveAction.RESTORE_DRIVE, title=meta.title)
+    record_event(db, user.sub, DRIVE_RESTORED, ctx, session_id=session_key(user, ctx), driveId=str(meta.drive_id), title=meta.title)
     await db.commit()
 
 
@@ -164,6 +173,7 @@ async def restore(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     storage: BlockStorage = Depends(get_storage),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> RestoreOut:
     cfg = payload.custom_config
     target = _connection(cfg)
@@ -193,7 +203,7 @@ async def restore(
                     add(drive_id, RestoreStatus.DAMAGED, DamageReason.OPS_CORRUPT)
                     continue
                 data_length = await measure_data_length(client, target.bucket, drive_id)
-                await _restore_one(db, user, cfg, found, ops_data, data_length)
+                await _restore_one(db, user, cfg, found, ops_data, data_length, ctx)
                 add(drive_id, RestoreStatus.RESTORED)
             except IntegrityError:
                 # Someone restored or created the same id since the check above.

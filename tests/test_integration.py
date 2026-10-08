@@ -101,6 +101,7 @@ async def test_userinfo_lifecycle(client_as):
         body = resp.json()
         member_since = datetime.fromisoformat(body.pop("memberSince"))
         assert abs(datetime.now(timezone.utc) - member_since) < timedelta(minutes=5)
+        assert body.pop("lastSeen") is None
         assert body == {"userId": user.sub, "email": user.email, "name": "", "avatar": DEFAULT_AVATAR}
 
         resp = await c.post("/userinfo", json={"name": "  Test User  "})
@@ -110,6 +111,7 @@ async def test_userinfo_lifecycle(client_as):
         assert resp.status_code == 200
         body = resp.json()
         body.pop("memberSince")
+        body.pop("lastSeen")
         assert body == {"userId": user.sub, "email": user.email, "name": "Test User", "avatar": DEFAULT_AVATAR}
 
         resp = await c.get(f"/userinfo/search/{user.email}")
@@ -197,6 +199,94 @@ async def test_userinfo_avatar(client_as):
         assert (await c.get("/userinfo/avatar")).status_code == 404
         assert (await c.delete("/userinfo/avatar")).status_code == 204
         assert (await c.get("/userinfo")).json()["avatar"]["kind"] == "default"
+
+
+CHROME_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+SAFARI_IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+
+
+async def test_account_activity_and_sessions(client_as):
+    """A new session records a sign-in with the browser and the address; profile changes are recorded; the sessions are listed
+    with the current one marked; `lastSeen` is when the user was last here before; a session signed out from another device is
+    refused by the backend; another user's session is not reachable."""
+    uid = f"u-{uuid.uuid4()}"
+    laptop = CurrentUser(sub=uid, username="t", email=f"{uuid.uuid4()}@example.com", session_id=f"sid-{uuid.uuid4()}")
+    phone = CurrentUser(sub=uid, username="t", email=laptop.email, session_id=f"sid-{uuid.uuid4()}")
+    stranger = CurrentUser(sub=f"u-{uuid.uuid4()}", username="s", email=f"{uuid.uuid4()}@example.com", session_id=f"sid-{uuid.uuid4()}")
+    mac, ios = {"user-agent": CHROME_MAC}, {"user-agent": SAFARI_IPHONE}
+
+    async with client_as(laptop) as c:
+        first = (await c.get("/userinfo", headers=mac)).json()
+        assert first["lastSeen"] is None  # the very first visit
+        assert (await c.post("/userinfo", json={"name": "Alex"}, headers=mac)).status_code == 204
+        assert (await c.put("/userinfo/avatar/preset", json={"preset": "moon"}, headers=mac)).status_code == 204
+
+        events = (await c.get("/userinfo/activity", headers=mac)).json()["items"]
+        assert [e["kind"] for e in events] == ["picture_changed", "name_changed", "sign_in"]
+        assert events[-1]["device"] == "Chrome on macOS" and events[-1]["ip"] == "127.0.0.1" and events[-1]["currentSession"] is True
+
+        sessions = (await c.get("/userinfo/sessions", headers=mac)).json()
+        assert [(s["device"], s["mobile"], s["current"]) for s in sessions] == [("Chrome on macOS", False, True)]
+
+    async with client_as(phone) as c:
+        second = (await c.get("/userinfo", headers=ios)).json()
+        assert second["lastSeen"] is not None  # the laptop was here before
+        # Parallel first calls of a visit record one sign-in, not two.
+        await c.get("/userinfo", headers=ios)
+        sessions = (await c.get("/userinfo/sessions", headers=ios)).json()
+        assert {(s["device"], s["mobile"], s["current"]) for s in sessions} == {("Chrome on macOS", False, False), ("Safari on iOS", True, True)}
+        laptop_id = next(s["id"] for s in sessions if not s["current"])
+        sign_ins = [e for e in (await c.get("/userinfo/activity", headers=ios)).json()["items"] if e["kind"] == "sign_in"]
+        assert len(sign_ins) == 2
+
+    async with client_as(stranger) as c:
+        assert (await c.delete(f"/userinfo/sessions/{laptop_id}")).status_code == 404
+
+    async with client_as(phone) as c:
+        assert (await c.delete(f"/userinfo/sessions/{phone.session_id}", headers=ios)).status_code == 400
+        assert (await c.delete(f"/userinfo/sessions/{laptop_id}", headers=ios)).status_code == 204
+        sessions = (await c.get("/userinfo/sessions", headers=ios)).json()
+        assert [s["current"] for s in sessions] == [True]
+
+    # The signed-out session is refused from now on, on any route.
+    async with client_as(laptop) as c:
+        refused = await c.get("/userinfo", headers=mac)
+        assert refused.status_code == 401 and refused.json()["detail"] == "Session was signed out"
+        assert (await c.get("/drives", headers=mac)).status_code == 401
+
+    async with client_as(phone) as c:
+        # Signing out on this device ends the session and records it.
+        assert (await c.delete("/userinfo/sessions/current", headers=ios)).status_code == 204
+        events = (await c.get("/userinfo/activity", headers=ios)).json()["items"]
+        assert [e["kind"] for e in events][:2] == ["sign_out", "session_revoked"]
+        assert (await c.get("/userinfo/sessions", headers=ios)).json() == []
+
+
+async def test_activity_paging_and_signing_out_other_sessions(client_as):
+    uid = f"u-{uuid.uuid4()}"
+    users = [CurrentUser(sub=uid, username="t", email=f"{uid}@example.com", session_id=f"sid-{uuid.uuid4()}") for _ in range(3)]
+    for user in users:
+        async with client_as(user) as c:
+            assert (await c.get("/userinfo")).status_code == 200
+
+    async with client_as(users[0]) as c:
+        page = (await c.get("/userinfo/activity", params={"limit": 2})).json()
+        assert len(page["items"]) == 2 and page["next"] is not None
+        rest = (await c.get("/userinfo/activity", params={"limit": 2, "before": page["next"]})).json()
+        assert len(rest["items"]) == 1 and rest["next"] is None
+        assert {e["id"] for e in page["items"]}.isdisjoint(e["id"] for e in rest["items"])
+
+        # Only the kinds asked for.
+        only = (await c.get("/userinfo/activity", params={"kind": ["sign_in", "sign_out"]})).json()["items"]
+        assert [e["kind"] for e in only] == ["sign_in"] * 3
+        assert (await c.get("/userinfo/activity", params={"kind": "name_changed"})).json() == {"items": [], "next": None}
+
+        assert (await c.delete("/userinfo/sessions/others")).status_code == 204
+        assert [s["current"] for s in (await c.get("/userinfo/sessions")).json()] == [True]
+        assert (await c.get("/userinfo/activity")).json()["items"][0]["kind"] == "other_sessions_revoked"
+
+    async with client_as(users[1]) as c:
+        assert (await c.get("/userinfo")).status_code == 401
 
 
 async def test_delete_drive_owner_only_and_respects_custom_target_choices(client_as):

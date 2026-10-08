@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     # Off by default; only the listed origins are ever allowed. Turn it on for local development.
     cors_allow_private_network: bool = False
 
+    # Account activity (sign-ins, sessions): where the client's IP address is read from, and how long events are kept.
+    # With 0 the address is the one of the connection. Behind N reverse proxies that each append to X-Forwarded-For, set N:
+    # the address N entries from the right of that header is used (the ones before it can be forged by the client).
+    trusted_proxy_hops: int = 0
+    activity_retention_days: int = 365
+
     # Infra-secret encryption (S3 credentials in s3_presets/drive_storage_targets.custom_config)
     # — a backend-only Fernet key, unrelated to the client's data-encryption key.
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

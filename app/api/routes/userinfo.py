@@ -1,21 +1,28 @@
 import asyncio
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import or_, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import Settings, get_settings
 from app.core.security import CurrentUser, get_current_user
-from app.db.models import User, UserAvatar
+from app.db.models import User, UserAvatar, UserEvent, UserSession
 from app.db.session import get_db
-from app.services.avatar_image import AvatarImageError, make_avatar_jpeg
 from app.schemas.user import (
     AVATAR_UPLOAD_MAX_BYTES,
     AvatarOut,
     SaveUserBasicInfoIn,
     SetAvatarPresetIn,
+    UserActivityPageOut,
     UserBasicInfoOut,
+    UserEventOut,
+    UserSessionOut,
 )
+from app.services import activity
+from app.services.activity import ClientContext, get_client_context
+from app.services.avatar_image import AvatarImageError, make_avatar_jpeg
 
 router = APIRouter(prefix="/userinfo", tags=["userinfo"])
 
@@ -70,6 +77,7 @@ async def set_avatar_preset(
     payload: SetAvatarPresetIn,
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
     """Chooses one of the preset pictures (this drops an uploaded image)."""
     await _ensure_user_row(db, user)
@@ -78,6 +86,7 @@ async def set_avatar_preset(
         db.add(UserAvatar(user_id=user.sub, preset=payload.preset))
     else:
         row.preset, row.image, row.content_type = payload.preset, None, None
+    activity.record_event(db, user.sub, activity.PICTURE_CHANGED, ctx, session_id=activity.session_key(user, ctx))
     await db.commit()
 
 
@@ -86,6 +95,7 @@ async def upload_avatar_image(
     request: Request,
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
     """Saves a picture the user uploaded: the request body is the image itself (PNG, JPEG or WebP, at most
     AVATAR_UPLOAD_MAX_BYTES). The server scales it to a small square JPEG and keeps only that."""
@@ -113,6 +123,7 @@ async def upload_avatar_image(
         db.add(UserAvatar(user_id=user.sub, image=jpeg, content_type="image/jpeg"))
     else:
         row.preset, row.image, row.content_type = None, jpeg, "image/jpeg"
+    activity.record_event(db, user.sub, activity.PICTURE_CHANGED, ctx, session_id=activity.session_key(user, ctx))
     await db.commit()
 
 
@@ -136,11 +147,13 @@ async def get_avatar_image(
 async def reset_avatar(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
     """Back to the default picture."""
     row = await db.get(UserAvatar, user.sub)
     if row is not None:
         await db.delete(row)
+        activity.record_event(db, user.sub, activity.PICTURE_CHANGED, ctx, session_id=activity.session_key(user, ctx))
         await db.commit()
 
 
@@ -153,8 +166,12 @@ def _token_name(user: CurrentUser) -> str:
 async def get_user_basic_info(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
+    settings: Settings = Depends(get_settings),
 ) -> UserBasicInfoOut:
-    """The profile of the signed-in user, created on the first call from the sign-in token.
+    """The profile of the signed-in user, created on the first call from the sign-in token. The call also notes that the user
+    is here (see `touch_session`): the first call of a new session records a sign-in, and `lastSeen` is when the user was last
+    seen before this visit.
 
     The email always follows the token (it cannot be changed here). The name is taken from the token only while the
     stored name is empty, so a name the user set later is never overwritten by the next sign-in; after a plain
@@ -181,12 +198,14 @@ async def get_user_basic_info(
             changed = True
         if changed:
             await db.commit()
+    last_seen = await activity.touch_session(db, user, ctx, settings)
     return UserBasicInfoOut(
         user_id=row.id,
         email=row.email,
         name=row.name,
         avatar=await _avatar_out(db, row.id),
         member_since=row.created_at,
+        last_seen=last_seen,
     )
 
 
@@ -195,6 +214,7 @@ async def save_user_basic_info(
     payload: SaveUserBasicInfoIn,
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
     """Saves the name. The email is not part of the request: it stays the one from the sign-in token."""
     row = await db.get(User, user.sub)
@@ -202,7 +222,136 @@ async def save_user_basic_info(
         row = User(id=user.sub, email=user.email or "", name=payload.name)
         db.add(row)
     else:
+        if row.name != payload.name:
+            activity.record_event(db, user.sub, activity.NAME_CHANGED, ctx, session_id=activity.session_key(user, ctx))
         row.name = payload.name
         if user.email:
             row.email = user.email
     await db.commit()
+
+
+@router.get("/activity", response_model=UserActivityPageOut)
+async def get_activity(
+    limit: int = Query(20, ge=1, le=100),
+    before: int | None = Query(None, ge=1, description="The `next` of the previous page"),
+    kind: list[str] | None = Query(None, max_length=20, description="Only events of these kinds (repeat the parameter)"),
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
+) -> UserActivityPageOut:
+    """The events of the user's account, newest first, `limit` at a time. Only the user's own events are ever returned."""
+    query = select(UserEvent).where(UserEvent.user_id == user.sub)
+    if kind:
+        query = query.where(UserEvent.kind.in_(kind))
+    if before is not None:
+        query = query.where(UserEvent.id < before)
+    rows = (await db.execute(query.order_by(UserEvent.id.desc()).limit(limit + 1))).scalars().all()
+    page, more = rows[:limit], len(rows) > limit
+    current = activity.session_key(user, ctx)
+    return UserActivityPageOut(
+        items=[
+            UserEventOut(
+                id=row.id, kind=row.kind, at=row.created_at, ip=row.ip, device=row.device, details=row.details,
+                session_id=row.session_id, current_session=row.session_id == current,
+            )
+            for row in page
+        ],
+        next=page[-1].id if more and page else None,
+    )
+
+
+@router.get("/sessions", response_model=list[UserSessionOut])
+async def get_sessions(
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
+) -> list[UserSessionOut]:
+    """The sessions the user is signed in with: not signed out, not revoked, seen in the last 30 days."""
+    since = datetime.now(timezone.utc) - activity.SESSION_LIST_WINDOW
+    rows = (
+        await db.execute(
+            select(UserSession)
+            .where(
+                UserSession.user_id == user.sub,
+                UserSession.ended_at.is_(None),
+                UserSession.revoked_at.is_(None),
+                UserSession.last_seen_at > since,
+            )
+            .order_by(UserSession.last_seen_at.desc())
+        )
+    ).scalars().all()
+    current = activity.session_key(user, ctx)
+    return [
+        UserSessionOut(
+            id=row.id, device=row.device, mobile=row.mobile, ip=row.ip, started_at=row.started_at,
+            last_seen_at=row.last_seen_at, current=row.id == current,
+        )
+        for row in rows
+    ]
+
+
+@router.delete("/sessions/current", status_code=status.HTTP_204_NO_CONTENT)
+async def end_current_session(
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
+) -> None:
+    """The user signs out on this device: the session is marked ended and a sign-out is recorded. The client calls this just
+    before it signs out of Keycloak."""
+    key = activity.session_key(user, ctx)
+    row = await db.get(UserSession, key)
+    if row is not None and row.user_id == user.sub and row.ended_at is None:
+        row.ended_at = datetime.now(timezone.utc)
+        activity.record_event(db, user.sub, activity.SIGN_OUT, ctx, session_id=key)
+        await db.commit()
+
+
+@router.delete("/sessions/others", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_other_sessions(
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
+) -> None:
+    """Signs out every session of the user but this one: the backend refuses their tokens from now on."""
+    key = activity.session_key(user, ctx)
+    now = datetime.now(timezone.utc)
+    revoked = (
+        await db.execute(
+            update(UserSession)
+            .where(
+                UserSession.user_id == user.sub,
+                UserSession.id != key,
+                UserSession.revoked_at.is_(None),
+                UserSession.ended_at.is_(None),
+            )
+            .values(revoked_at=now)
+            .returning(UserSession.id)
+        )
+    ).scalars().all()
+    if revoked:
+        activity.record_event(db, user.sub, activity.OTHER_SESSIONS_REVOKED, ctx, session_id=key, count=len(revoked))
+    await db.commit()
+    for session_id in revoked:
+        activity.remember_revoked(session_id)
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_session(
+    session_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
+) -> None:
+    """Signs out one of the user's other sessions: the backend refuses its tokens from now on. To sign out of this device
+    use DELETE /userinfo/sessions/current. A session of another user is answered as if it did not exist."""
+    key = activity.session_key(user, ctx)
+    row = await db.get(UserSession, session_id)
+    if row is None or row.user_id != user.sub:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    if row.id == key:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This is the current session")
+    if row.revoked_at is None:
+        row.revoked_at = datetime.now(timezone.utc)
+        activity.record_event(db, user.sub, activity.SESSION_REVOKED, ctx, session_id=key, device=row.device)
+        await db.commit()
+        activity.remember_revoked(row.id)

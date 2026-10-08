@@ -22,10 +22,22 @@ from app.db.models import (
 from app.db.session import get_db
 from app.schemas.drive import CreateDriveIn, DeleteDriveIn, DriveInfoOut
 from app.schemas.drive_action import DriveActionLogOut
+from app.services.activity import (
+    DRIVE_CREATED,
+    DRIVE_DELETED,
+    ClientContext,
+    get_client_context,
+    record_event,
+    session_key,
+)
 from app.services.audit import log_action
 from app.services.secrets import encrypt_secret
 from app.services.storage import BlockStorage, BlockWriteError, get_storage
-from app.services.storage_targets import get_active_targets, get_or_create_legacy_global_preset, resolve_target
+from app.services.storage_targets import (
+    get_active_targets,
+    get_or_create_legacy_global_preset,
+    resolve_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +98,7 @@ async def create_drive(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     storage: BlockStorage = Depends(get_storage),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> DriveInfoOut:
     target_kwargs = await _initial_target_kwargs(db, payload)
 
@@ -121,6 +134,7 @@ async def create_drive(
         raise storage_write_failed(exc) from exc
 
     log_action(db, drive.id, user.sub, DriveAction.CREATE_DRIVE, title=drive.title)
+    record_event(db, user.sub, DRIVE_CREATED, ctx, session_id=session_key(user, ctx), driveId=str(drive.id), title=drive.title)
     await db.commit()
     return _to_drive_info(drive)
 
@@ -158,6 +172,7 @@ async def delete_drive(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     storage: BlockStorage = Depends(get_storage),
+    ctx: ClientContext = Depends(get_client_context),
 ) -> None:
     """Deletes a drive outright — owner only, not just anyone in the ACL
     (owload-docs/decisions/0013): far more destructive than the read/write
@@ -216,7 +231,10 @@ async def delete_drive(
                     drive_id, target.id, exc, exc_info=True,
                 )
 
+    title = drive.title
     await db.delete(drive)
+    # The drive's own action log goes with it (cascade); the account's event outlives it.
+    record_event(db, user.sub, DRIVE_DELETED, ctx, session_id=session_key(user, ctx), driveId=str(drive_id), title=title)
     await db.commit()
 
 

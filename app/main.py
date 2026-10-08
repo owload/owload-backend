@@ -1,6 +1,7 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.deps import require_active_session
 from app.api.routes.data import router as data_router
 from app.api.routes.drive_restore import router as drive_restore_router
 from app.api.routes.drives import router as drives_router
@@ -26,15 +27,18 @@ app.add_middleware(
 )
 
 # No shared prefix: each router's own prefix matches the frontend's REST paths.
-app.include_router(drive_restore_router)
-app.include_router(drives_router)
-app.include_router(ops_router)
-app.include_router(sessions_router)
-app.include_router(data_router)
-app.include_router(s3_presets_router)
-app.include_router(storage_targets_router)
-app.include_router(storage_targets_test_router)
-app.include_router(userinfo_router)
+for router in (
+    drive_restore_router,
+    drives_router,
+    ops_router,
+    sessions_router,
+    data_router,
+    s3_presets_router,
+    storage_targets_router,
+    storage_targets_test_router,
+    userinfo_router,
+):
+    app.include_router(router, dependencies=[Depends(require_active_session)])
 
 
 @app.get("/healthz")

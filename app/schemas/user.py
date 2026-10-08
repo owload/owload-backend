@@ -36,6 +36,8 @@ class UserBasicInfoOut(BaseModel):
     avatar: AvatarOut = AvatarOut(kind="default")
     # When the user first signed in to Owload (the profile is created on the first call); only the signed-in user's profile has it.
     member_since: datetime | None = Field(default=None, alias="memberSince")
+    # When the user was last seen before this visit (None the first time); only the signed-in user's profile has it.
+    last_seen: datetime | None = Field(default=None, alias="lastSeen")
 
 
 class SetAvatarPresetIn(BaseModel):
@@ -53,3 +55,37 @@ class SaveUserBasicInfoIn(BaseModel):
     """Only the name can be changed; the email always comes from the sign-in token. An empty name clears it."""
 
     name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=255)]
+
+
+class UserSessionOut(BaseModel):
+    """A sign-in of the user: where from and when. `current` is the session of the request."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    device: str
+    mobile: bool
+    ip: str | None
+    started_at: datetime = Field(alias="startedAt")
+    last_seen_at: datetime = Field(alias="lastSeenAt")
+    current: bool
+
+
+class UserEventOut(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: int
+    kind: str
+    at: datetime
+    ip: str | None
+    device: str | None
+    details: dict
+    session_id: str | None = Field(alias="sessionId")
+    current_session: bool = Field(alias="currentSession")
+
+
+class UserActivityPageOut(BaseModel):
+    """A page of the events of the user, newest first. `next` is the cursor for the page after it (None at the end)."""
+
+    items: list[UserEventOut]
+    next: int | None

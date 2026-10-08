@@ -16,6 +16,8 @@ class CurrentUser:
     email: str | None
     # The display name from the identity provider (Google, SSO); absent after a plain registration.
     name: str | None = None
+    # The Keycloak session the token belongs to (`sid`, or `session_state` in older tokens); one per sign-in.
+    session_id: str | None = None
 
 
 class KeycloakJWKSCache:
@@ -92,4 +94,5 @@ async def get_current_user(
         username=claims.get("preferred_username"),
         email=claims.get("email"),
         name=claims["name"] if isinstance(claims.get("name"), str) else None,
+        session_id=next((claims[key] for key in ("sid", "session_state") if isinstance(claims.get(key), str) and claims[key]), None),
     )

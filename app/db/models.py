@@ -56,6 +56,44 @@ class UserAvatar(Base):
     )
 
 
+class UserSession(Base):
+    """A sign-in of a user to Owload, seen by the backend: the Keycloak session id (`sid`) with where it came from. Created the
+    first time a token of that session is seen; `revoked_at` is set when the user signs the session out from another device
+    (the backend then refuses its tokens, see app/api/deps.py)."""
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    device: Mapped[str] = mapped_column(String(120), nullable=False, default="Unknown device")
+    mobile: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # When the user was last seen before the current visit (the visit being a run of activity without a 30 minute gap).
+    prev_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UserEvent(Base):
+    """What the user did to their account and from where: sign-ins and sign-outs, profile changes, drives created or deleted.
+    Written in the same transaction as the action it describes (see app/services/activity.py). Not a log of file operations:
+    those are in `drive_action_log`."""
+
+    __tablename__ = "user_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    device: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
 class Drive(Base):
     """An encrypted drive: an append-only ops log plus a byte-addressable
     data area. Both are opaque ciphertext to the server — encryption/decryption
