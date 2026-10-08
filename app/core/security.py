@@ -18,6 +18,8 @@ class CurrentUser:
     name: str | None = None
     # The Keycloak session the token belongs to (`sid`, or `session_state` in older tokens); one per sign-in.
     session_id: str | None = None
+    # Whether the identity provider vouches for the email (the `email_verified` claim).
+    email_verified: bool = False
 
 
 _ASYMMETRIC_ALGORITHMS = frozenset({"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"})
@@ -104,5 +106,6 @@ async def get_current_user(
         username=claims.get("preferred_username"),
         email=claims.get("email"),
         name=claims["name"] if isinstance(claims.get("name"), str) else None,
+        email_verified=claims.get("email_verified") is True,
         session_id=next((claims[key] for key in ("sid", "session_state") if isinstance(claims.get(key), str) and claims[key]), None),
     )

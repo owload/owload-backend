@@ -34,6 +34,18 @@ class Settings(BaseSettings):
     trusted_proxy_hops: int = 0
     activity_retention_days: int = 365
 
+    # Sharing drives. `app_url` is the address of the client (used in the links of invitations and of public drives). The mail
+    # server sends the invitations; without `smtp_host` nothing is sent and the client shows the invitation link to copy.
+    app_url: str = "http://localhost:8080"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_starttls: bool = True
+    # Reads of the public drives of one IP address per minute (the link is the only secret of a public drive).
+    public_reads_per_minute: int = 600
+
     # Infra-secret encryption (S3 credentials in s3_presets/drive_storage_targets.custom_config)
     # — a backend-only Fernet key, unrelated to the client's data-encryption key.
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

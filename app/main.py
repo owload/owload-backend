@@ -2,10 +2,12 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.deps import require_active_session
+from app.api.routes.access import router as access_router
 from app.api.routes.data import router as data_router
 from app.api.routes.drive_restore import router as drive_restore_router
 from app.api.routes.drives import router as drives_router
 from app.api.routes.ops import router as ops_router
+from app.api.routes.public import router as public_router
 from app.api.routes.s3_presets import router as s3_presets_router
 from app.api.routes.sessions import router as sessions_router
 from app.api.routes.storage_targets import router as storage_targets_router
@@ -30,6 +32,7 @@ app.add_middleware(
 for router in (
     drive_restore_router,
     drives_router,
+    access_router,
     ops_router,
     sessions_router,
     data_router,
@@ -39,6 +42,9 @@ for router in (
     userinfo_router,
 ):
     app.include_router(router, dependencies=[Depends(require_active_session)])
+
+# The public drives are read without signing in: no token, so no check of the session either.
+app.include_router(public_router)
 
 
 @app.get("/healthz")

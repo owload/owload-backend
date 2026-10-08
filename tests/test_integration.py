@@ -343,6 +343,165 @@ async def test_drive_access_is_noted_once_per_burst(client_as, monkeypatch):
         assert {e["sessionId"] for e in opened} == {laptop.session_id, phone.session_id}
 
 
+async def test_sharing_a_drive_roles_invitations_and_the_public_link(client_as, monkeypatch):
+    """Visibility, roles on a drive, invitations by email that turn into access when the verified address signs in, and the public link
+    that opens a drive read-only without signing in."""
+    from app.api.routes import access as access_routes
+
+    sent: list[tuple[str, str, str]] = []
+
+    async def fake_send(settings, to, subject, body):
+        sent.append((to, subject, body))
+        return True
+
+    monkeypatch.setattr(access_routes, "send_mail", fake_send)
+
+    def person(label, verified=True):
+        uid = f"u-{uuid.uuid4()}"
+        return CurrentUser(sub=uid, username=label, email=f"{label}-{uuid.uuid4().hex[:8]}@example.com", name=label.title(),
+                           session_id=f"sid-{uuid.uuid4()}", email_verified=verified)
+
+    owner, ben, carol = person("owner"), person("ben"), person("carol", verified=False)
+
+    async with client_as(owner) as c:
+        assert (await c.get("/userinfo")).status_code == 200
+        drive = (await c.post("/drives", json={"title": "Shared drive", "keyNonce": "aa", "counterNonce": "bb"})).json()
+        drive_id = drive["id"]
+        assert drive["visibility"] == "private" and drive["myRole"] == "owner"
+        access = (await c.get(f"/drives/{drive_id}/access")).json()
+        assert access["visibility"] == "private" and access["myRole"] == "owner" and access["people"] == []
+
+    async with client_as(ben) as c:
+        assert (await c.get("/userinfo")).status_code == 200  # Ben has an account now (and a verified address)
+        assert (await c.get(f"/drives/{drive_id}")).status_code == 404  # a private drive is not Ben's to see
+        assert drive_id not in [d["id"] for d in (await c.get("/drives")).json()]
+
+    async with client_as(owner) as c:
+        # Only a shared drive has people: a private one takes nobody.
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": ben.email, "role": "reader"})).status_code == 409
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "shared"})).status_code == 200
+        # Sharing with an address that has an account gives the drive at once.
+        added = await c.post(f"/drives/{drive_id}/access/people", json={"email": ben.email.upper(), "role": "reader"})
+        assert added.status_code == 201
+        body = added.json()
+        assert body["person"]["status"] == "member" and body["person"]["id"] == ben.sub and body["emailSent"] is True
+        assert "Shared drive" in sent[-1][1] and sent[-1][0] == ben.email
+        assert "password" in sent[-1][2].lower()  # tells to ask for it; it is never in the message
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": owner.email, "role": "reader"})).status_code == 400
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": "nonsense", "role": "reader"})).status_code == 422
+
+    async with client_as(ben) as c:
+        listed = {d["id"]: d for d in (await c.get("/drives")).json()}
+        assert listed[drive_id]["myRole"] == "reader" and listed[drive_id]["ownerEmail"] == owner.email and listed[drive_id]["ACL"] == {}
+        assert (await c.get(f"/ops/{drive_id}/0")).status_code == 200
+        # A reader cannot write, manage storages or change the access, and sees no people.
+        assert (await c.post(f"/ops/{drive_id}", content=b"op")).status_code == 403
+        assert (await c.post("/sessions", params={"driveId": drive_id, "byteLength": 1})).status_code == 403
+        assert (await c.get(f"/drives/{drive_id}/storage-targets")).status_code == 200
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "public"})).status_code == 403
+        assert (await c.get(f"/drives/{drive_id}/access")).json() == {"visibility": "shared", "myRole": "reader", "publicLink": None, "people": [], "mailEnabled": False}
+        assert (await c.request("DELETE", f"/drives/{drive_id}", json={"customTargetDecisions": []})).status_code == 403
+
+    async with client_as(owner) as c:
+        assert (await c.patch(f"/drives/{drive_id}/access/people/{ben.sub}", json={"role": "writer"})).status_code == 200
+    async with client_as(ben) as c:
+        assert (await c.post(f"/ops/{drive_id}", content=b"op")).status_code == 204  # a writer writes
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": "x@example.com", "role": "reader"})).status_code == 403
+
+    async with client_as(owner) as c:
+        assert (await c.patch(f"/drives/{drive_id}/access/people/{ben.sub}", json={"role": "admin"})).status_code == 200
+    async with client_as(ben) as c:
+        # An admin manages people, but not the admins, and cannot make one.
+        invited = await c.post(f"/drives/{drive_id}/access/people", json={"email": carol.email, "role": "writer"})
+        assert invited.status_code == 201 and invited.json()["person"]["status"] == "invited"
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": "y@example.com", "role": "admin"})).status_code == 403
+        assert (await c.delete(f"/drives/{drive_id}/access/people/{owner.sub}")).status_code == 404
+        people = (await c.get(f"/drives/{drive_id}/access")).json()["people"]
+        assert {(p["status"], p["role"]) for p in people} == {("member", "admin"), ("invited", "writer")}
+
+    async with client_as(carol) as c:
+        # Carol signs up with an address the identity provider has not verified: the invitation waits.
+        assert (await c.get("/userinfo")).status_code == 200
+        assert drive_id not in [d["id"] for d in (await c.get("/drives")).json()]
+    verified_carol = CurrentUser(sub=carol.sub, username="carol", email=carol.email, name="Carol", session_id=carol.session_id, email_verified=True)
+    async with client_as(verified_carol) as c:
+        assert (await c.get("/userinfo")).status_code == 200  # the address is verified: the invitation becomes access
+        listed = {d["id"]: d for d in (await c.get("/drives")).json()}
+        assert listed[drive_id]["myRole"] == "writer"
+        events = (await c.get("/userinfo/activity", params={"kind": "drive_shared_with_you"})).json()["items"]
+        assert events and events[0]["details"]["driveId"] == drive_id
+
+    async with client_as(owner) as c:
+        # A pending invitation, then the drive stops being shared: every person and every invitation goes.
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": "pending@example.com", "role": "reader"})).status_code == 201
+        assert len((await c.get(f"/drives/{drive_id}/access")).json()["people"]) == 3  # Ben, Carol and the pending invitation
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "private"})).status_code == 200
+        assert (await c.get(f"/drives/{drive_id}/access")).json()["people"] == []
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": ben.email, "role": "reader"})).status_code == 409
+        removed = (await c.get("/userinfo/activity", params={"kind": "drive_visibility_changed"})).json()["items"][0]["details"]
+        assert removed["visibility"] == "private" and removed["removedPeople"] == 3
+    async with client_as(ben) as c:
+        assert (await c.get(f"/drives/{drive_id}")).status_code == 404
+    async with client_as(owner) as c:
+        # Shared again: nobody is back, until they are added again.
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "shared"})).status_code == 200
+        assert (await c.get(f"/drives/{drive_id}/access")).json()["people"] == []
+    async with client_as(ben) as c:
+        assert (await c.get(f"/drives/{drive_id}")).status_code == 404
+    async with client_as(owner) as c:
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": ben.email, "role": "reader"})).status_code == 201
+    async with client_as(ben) as c:
+        assert (await c.get(f"/drives/{drive_id}")).status_code == 200
+        assert (await c.delete(f"/drives/{drive_id}/access/me")).status_code == 204  # Ben leaves
+        assert (await c.get(f"/drives/{drive_id}")).status_code == 404
+
+    async with client_as(owner) as c:
+        # Public: a link that opens the drive read-only, without signing in.
+        public = (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "public"})).json()
+        assert public["people"] == []
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": ben.email, "role": "reader"})).status_code == 409
+        link = public["publicLink"]
+        token = link.rsplit("/p/", 1)[1]
+        assert len(token) >= 40
+        await c.post(f"/ops/{drive_id}", content=b"hello")
+        events = [e["kind"] for e in (await c.get("/userinfo/activity", params={"limit": 100})).json()["items"] if e["details"].get("driveId") == drive_id]
+        assert {"drive_visibility_changed", "drive_person_added", "drive_role_changed"} <= set(events)  # the owner's own; Ben's invitation is in his log
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as anonymous:
+        app.dependency_overrides.pop(get_current_user, None)
+        info = await anonymous.get(f"/public/{token}")
+        assert info.status_code == 200
+        assert info.json()["id"] == drive_id and info.json()["keyNonce"] == "aa" and info.headers["cache-control"] == "no-store"
+        assert (await anonymous.get(f"/public/{token}/ops/0")).content == b"ophello"  # Ben wrote "op" before
+        assert (await anonymous.get(f"/public/{token}/data", params={"start": 0, "end": 1})).status_code == 200
+        assert (await anonymous.get(f"/public/{token}/nonsense")).status_code == 404
+        assert (await anonymous.get("/public/" + "a" * 43)).status_code == 404
+        assert (await anonymous.get("/public/short")).status_code == 404
+        # Nothing but reading: the API of the drive wants a token.
+        assert (await anonymous.post(f"/ops/{drive_id}", content=b"x")).status_code == 401
+
+    async with client_as(owner) as c:
+        new_link = (await c.post(f"/drives/{drive_id}/access/link/reset")).json()["publicLink"]
+        new_token = new_link.rsplit("/p/", 1)[1]
+        assert new_token != token
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "shared"})).status_code == 200
+        assert (await c.post(f"/drives/{drive_id}/access/link/reset")).status_code == 400
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as anonymous:
+        assert (await anonymous.get(f"/public/{token}")).status_code == 404
+        assert (await anonymous.get(f"/public/{new_token}")).status_code == 404
+
+
+async def test_public_reads_are_rate_limited():
+    from app.services.access import _recent_public_reads, public_read_allowed
+
+    _recent_public_reads.clear()
+    assert all(public_read_allowed("203.0.113.9", 3) for _ in range(3))
+    assert public_read_allowed("203.0.113.9", 3) is False
+    assert public_read_allowed("203.0.113.10", 3) is True  # another address has its own budget
+    assert public_read_allowed("203.0.113.9", 0) is True  # 0 turns the limit off
+    _recent_public_reads.clear()
+
+
 async def test_delete_drive_owner_only_and_respects_custom_target_choices(client_as):
     """Epic 0015 task 0001: DELETE /drives/{driveId} — owner only (403 for
     an ACL member, 404 for a total stranger, matching decisions/0013's

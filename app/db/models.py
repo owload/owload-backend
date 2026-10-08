@@ -11,6 +11,7 @@ from sqlalchemy import (
     LargeBinary,
     SmallInteger,
     String,
+    UniqueConstraint,
     Text,
     func,
 )
@@ -30,6 +31,9 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(255), primary_key=True)  # Keycloak `sub`
     email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Whether the identity provider vouches for the email (the `email_verified` claim). Only a verified email may receive a
+    # drive that was shared with that address.
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -54,6 +58,23 @@ class UserAvatar(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class DriveInvitation(Base):
+    """A drive shared with an email address that has no verified account yet. It turns into an entry of the drive's `acl`
+    when someone signs in with that address and the identity provider vouches for it (app/services/access.py)."""
+
+    __tablename__ = "drive_invitations"
+    __table_args__ = (UniqueConstraint("drive_id", "email", name="uq_drive_invitations_drive_email"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    drive_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("drives.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)  # lower case
+    role: Mapped[str] = mapped_column(String(10), nullable=False)
+    invited_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class UserSession(Base):
@@ -106,8 +127,14 @@ class Drive(Base):
     owner_user_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # dict[userId, list[str]] of Privilege names ("READ"/"WRITE") shared with other users.
+    # dict[userId, role] of the people the drive is shared with; the role is "admin", "writer" or "reader" (older rows may hold
+    # a list of the privileges "READ"/"WRITE", see app/services/access.py). Counts only while `visibility` is not "private".
     acl: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    # "private" (only the owner), "shared" (the owner and the people in `acl`) or "public" (also anyone with the link
+    # `public_token`, read-only, no sign-in; the content is still encrypted and needs the drive's password).
+    visibility: Mapped[str] = mapped_column(String(10), nullable=False, default="private", server_default="private")
+    public_token: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
 
     key_nonce: Mapped[str] = mapped_column(Text, nullable=False)
     counter_nonce: Mapped[str] = mapped_column(Text, nullable=False)

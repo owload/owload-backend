@@ -9,6 +9,7 @@ from app.api.errors import storage_write_failed
 from app.core.security import CurrentUser, get_current_user
 from app.db.models import Drive, DriveAction
 from app.db.session import get_db
+from app.services.access import Role
 from app.services.activity import (
     DRIVE_OPENED,
     DRIVE_WRITTEN,
@@ -57,7 +58,7 @@ async def save_operation(
     # many-operations-per-call (e.g. batching for fewer round trips), the
     # correlation formula on the frontend breaks silently — coordinate any
     # change here with owload-docs/epics/0004-drive-logs-technical-debt/tasks/0003.
-    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub, Role.WRITER)
     targets = await get_active_targets(db, drive_id)
     chunk = await request.body()
 

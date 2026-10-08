@@ -12,6 +12,7 @@ from app.core.security import CurrentUser, get_current_user
 from app.db.models import DriveAction, UploadSession
 from app.db.session import get_db
 from app.schemas.data_range import DataRangeOut
+from app.services.access import Role
 from app.services.activity import (
     DRIVE_FILES_READ,
     DRIVE_WRITTEN,
@@ -44,7 +45,7 @@ async def save_data_block(
     session = await db.get(UploadSession, session_id)
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    drive = await get_accessible_drive_or_404(db, session.drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, session.drive_id, user.sub, Role.WRITER)
     targets = await get_active_targets(db, session.drive_id)
 
     body = await request.body()
@@ -117,7 +118,7 @@ async def free_data_range(
     if end < start:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end must be >= start")
 
-    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub, Role.WRITER)
     targets = await get_active_targets(db, drive_id)
     try:
         blocks_deleted = await storage.free_range(targets, drive_id, start, end)

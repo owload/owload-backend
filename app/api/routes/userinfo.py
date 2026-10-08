@@ -20,7 +20,7 @@ from app.schemas.user import (
     UserEventOut,
     UserSessionOut,
 )
-from app.services import activity
+from app.services import access, activity
 from app.services.activity import ClientContext, get_client_context
 from app.services.avatar_image import AvatarImageError, make_avatar_jpeg
 
@@ -178,7 +178,7 @@ async def get_user_basic_info(
     registration the token has no name and the name stays empty."""
     row = await db.get(User, user.sub)
     if row is None:
-        row = User(id=user.sub, email=user.email or "", name=_token_name(user))
+        row = User(id=user.sub, email=user.email or "", name=_token_name(user), email_verified=user.email_verified)
         db.add(row)
         try:
             await db.commit()
@@ -196,8 +196,20 @@ async def get_user_basic_info(
         if not row.name and _token_name(user):
             row.name = _token_name(user)
             changed = True
+        if row.email_verified != user.email_verified:
+            row.email_verified = user.email_verified
+            changed = True
         if changed:
             await db.commit()
+    # Drives that were shared with this address before the person had an account (or a verified address) are theirs now.
+    accepted = await access.accept_invitations(db, user)
+    for drive, role in accepted:
+        activity.record_event(
+            db, user.sub, activity.DRIVE_SHARED_WITH_YOU, ctx, session_id=activity.session_key(user, ctx),
+            driveId=str(drive.id), title=drive.title, role=role,
+        )
+    if accepted:
+        await db.commit()
     last_seen = await activity.touch_session(db, user, ctx, settings)
     return UserBasicInfoOut(
         user_id=row.id,

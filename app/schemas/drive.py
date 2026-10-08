@@ -66,3 +66,10 @@ class DriveInfoOut(BaseModel):
     created_timestamp: int = Field(alias="createdTimestamp")
     key_nonce: str = Field(alias="keyNonce")
     counter_nonce: str = Field(alias="counterNonce")
+    # "private", "shared" or "public" (app/services/access.py), and what the caller may do on the drive: "owner", "admin",
+    # "writer" or "reader". Only an owner or an admin gets the ACL (people and roles); for others it is empty.
+    visibility: str = "private"
+    my_role: str = Field(default="owner", alias="myRole")
+    people_count: int = Field(default=0, alias="peopleCount")
+    owner_name: str | None = Field(default=None, alias="ownerName")
+    owner_email: str | None = Field(default=None, alias="ownerEmail")

@@ -2,11 +2,11 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import desc, or_, select
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import get_accessible_drive_or_404
+from app.api.deps import get_accessible_drive_or_404, get_drive_and_role
 from app.api.errors import storage_write_failed
 from app.core.security import CurrentUser, get_current_user
 from app.db.models import (
@@ -18,10 +18,12 @@ from app.db.models import (
     S3Tier,
     StorageTargetRole,
     StorageTargetStatus,
+    User,
 )
 from app.db.session import get_db
 from app.schemas.drive import CreateDriveIn, DeleteDriveIn, DriveInfoOut
 from app.schemas.drive_action import DriveActionLogOut
+from app.services.access import ROLE_LABELS, SHARED, Role, role_of
 from app.services.activity import (
     DRIVE_CREATED,
     DRIVE_DELETED,
@@ -44,15 +46,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/drives", tags=["drives"])
 
 
-def _to_drive_info(drive: Drive) -> DriveInfoOut:
+def _to_drive_info(drive: Drive, role: Role, owner: User | None = None) -> DriveInfoOut:
     return DriveInfoOut(
         id=str(drive.id),
         owner_user_id=drive.owner_user_id,
         title=drive.title,
-        acl=drive.acl,
+        acl=drive.acl if role >= Role.ADMIN else {},
         created_timestamp=int(drive.created_at.timestamp() * 1000),
         key_nonce=drive.key_nonce,
         counter_nonce=drive.counter_nonce,
+        visibility=drive.visibility,
+        my_role=ROLE_LABELS[role],
+        people_count=len(drive.acl or {}) if role >= Role.ADMIN else 0,
+        owner_name=(owner.name or None) if owner is not None and role != Role.OWNER else None,
+        owner_email=owner.email if owner is not None and role != Role.OWNER else None,
     )
 
 
@@ -136,7 +143,7 @@ async def create_drive(
     log_action(db, drive.id, user.sub, DriveAction.CREATE_DRIVE, title=drive.title)
     record_event(db, user.sub, DRIVE_CREATED, ctx, session_id=session_key(user, ctx), driveId=str(drive.id), title=drive.title)
     await db.commit()
-    return _to_drive_info(drive)
+    return _to_drive_info(drive, Role.OWNER)
 
 
 @router.get("", response_model=list[DriveInfoOut])
@@ -144,10 +151,20 @@ async def get_accessible_drives(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[DriveInfoOut]:
+    # Mine, and the ones shared with me (only a shared drive has people).
     result = await db.execute(
-        select(Drive).where(or_(Drive.owner_user_id == user.sub, Drive.acl.has_key(user.sub)))
+        select(Drive).where(
+            or_(Drive.owner_user_id == user.sub, and_(Drive.visibility == SHARED, Drive.acl.has_key(user.sub)))
+        )
     )
-    return [_to_drive_info(d) for d in result.scalars().all()]
+    drives = result.scalars().all()
+    other_owners = {d.owner_user_id for d in drives if d.owner_user_id != user.sub}
+    owners = (
+        {u.id: u for u in (await db.execute(select(User).where(User.id.in_(other_owners)))).scalars().all()}
+        if other_owners
+        else {}
+    )
+    return [_to_drive_info(d, role_of(d, user.sub) or Role.READER, owners.get(d.owner_user_id)) for d in drives]
 
 
 @router.get("/{drive_id}", response_model=DriveInfoOut)
@@ -156,8 +173,9 @@ async def get_drive_info(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DriveInfoOut:
-    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
-    return _to_drive_info(drive)
+    drive, role = await get_drive_and_role(db, drive_id, user.sub)
+    owner = await db.get(User, drive.owner_user_id) if role != Role.OWNER else None
+    return _to_drive_info(drive, role, owner)
 
 
 @router.delete("/{drive_id}", status_code=status.HTTP_204_NO_CONTENT)

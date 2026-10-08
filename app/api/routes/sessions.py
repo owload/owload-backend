@@ -9,6 +9,7 @@ from app.core.security import CurrentUser, get_current_user
 from app.db.models import Drive, DriveAction, SessionStatus, UploadSession
 from app.db.session import get_db
 from app.schemas.session import SessionInfoOut
+from app.services.access import Role
 from app.services.activity import (
     DRIVE_WRITTEN,
     ClientContext,
@@ -40,7 +41,7 @@ async def start_upload_session(
     db: AsyncSession = Depends(get_db),
     ctx: ClientContext = Depends(get_client_context),
 ) -> SessionInfoOut:
-    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub, Role.WRITER)
 
     # Atomically reserve [old data_length, old data_length + byte_length) for this session.
     result = await db.execute(
@@ -80,7 +81,7 @@ async def finish_upload_session(
     session = await db.get(UploadSession, session_id)
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    drive = await get_accessible_drive_or_404(db, session.drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, session.drive_id, user.sub, Role.WRITER)
     if session.status in (SessionStatus.FINISHED, SessionStatus.STALE):
         raise HTTPException(status.HTTP_409_CONFLICT, "Session is closed")
 

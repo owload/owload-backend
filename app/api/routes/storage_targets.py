@@ -22,6 +22,7 @@ from app.schemas.storage_target import (
     ConnectionTestOut,
     StorageTargetOut,
 )
+from app.services.access import Role
 from app.services.activity import (
     STORAGE_TARGET_ADDED,
     STORAGE_TARGET_MAIN_CHANGED,
@@ -146,7 +147,7 @@ async def add_storage_target(
     nothing to backfill in the first place — master and a brand-new slave
     are already trivially byte-identical (both empty) — so that one case
     can safely go straight to ACTIVE without waiting on epic 0013 at all."""
-    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub, Role.ADMIN)
     initial_status = (
         StorageTargetStatus.ACTIVE
         if drive.data_length == 0 and len(drive.ops_data) == 0
@@ -231,7 +232,7 @@ async def test_storage_target(
     resolves and decrypts them itself, the caller never sends secrets
     back over the wire for this. Always 200: a failed connection is a
     result to show the user, not an API error."""
-    await get_accessible_drive_or_404(db, drive_id, user.sub)
+    await get_accessible_drive_or_404(db, drive_id, user.sub, Role.ADMIN)
     target = await _get_target_or_404(db, drive_id, target_id)
     ok, error = await storage.test_connection(resolve_target(target))
     return ConnectionTestOut(ok=ok, error=error)
@@ -272,7 +273,7 @@ async def make_master(
     ACTIVE/PROVISIONING target already receives every write via fan-out
     (owload-docs/decisions/0011), so no data needs to move and no active upload
     session needs to be paused."""
-    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub, Role.ADMIN)
     target = await _get_target_or_404(db, drive_id, target_id)
 
     if target.role == StorageTargetRole.MASTER:
@@ -314,7 +315,7 @@ async def remove_storage_target(
     storage: BlockStorage = Depends(get_storage),
     ctx: ClientContext = Depends(get_client_context),
 ) -> None:
-    drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
+    drive = await get_accessible_drive_or_404(db, drive_id, user.sub, Role.ADMIN)
     target = await _get_target_or_404(db, drive_id, target_id)
 
     if target.role == StorageTargetRole.MASTER:
