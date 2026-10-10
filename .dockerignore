@@ -1,0 +1,18 @@
+# Nothing of the working directory goes into an image unless the Dockerfile asks for it by name; this keeps secrets and
+# clutter out even if a COPY is widened one day.
+.git
+.gitignore
+.github
+.claude
+.env
+.env.*
+!.env.example
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+tests
+docker-compose.yml
+*.md

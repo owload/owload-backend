@@ -1,7 +1,7 @@
 """The profile pictures of users: the user_avatars table.
 
 Revision ID: 20261008_user_avatars
-Revises:
+Revises: 20260916_baseline
 Create Date: 2026-10-08
 
 The statements are idempotent (IF NOT EXISTS): the repository holds no earlier migration, and the databases that exist
@@ -12,7 +12,7 @@ from typing import Sequence, Union
 from alembic import op
 
 revision: str = "20261008_user_avatars"
-down_revision: Union[str, None] = None
+down_revision: Union[str, None] = "20260916_baseline"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

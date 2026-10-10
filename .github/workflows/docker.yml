@@ -1,0 +1,64 @@
+name: Docker image
+
+# A tag like v0.3.0 builds the image for Intel/AMD and ARM and pushes it to Docker Hub as owload-backend:0.3.0 (and 0.3, and latest).
+# A run by hand (Actions, "Run workflow") only builds and checks the image, it pushes nothing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ${{ vars.DOCKERHUB_NAMESPACE }}/owload-backend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # Build once for this machine and look inside before anything is published.
+      - name: Build for a check
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          load: true
+          tags: owload-backend:check
+      - name: The image holds no secrets and starts as a normal user
+        run: |
+          docker run --rm --entrypoint sh owload-backend:check -c '
+            test ! -e /app/.env && test ! -e /app/.git && test ! -e /app/tests && test ! -e /app/.venv
+            test "$(id -u)" != 0
+            test -f /app/alembic.ini && test -d /app/app
+          '
+
+      - name: Log in to Docker Hub
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Tags
+        id: meta
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - name: Build and push for Intel/AMD and ARM
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
