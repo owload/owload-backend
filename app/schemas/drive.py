@@ -73,3 +73,9 @@ class DriveInfoOut(BaseModel):
     people_count: int = Field(default=0, alias="peopleCount")
     owner_name: str | None = Field(default=None, alias="ownerName")
     owner_email: str | None = Field(default=None, alias="ownerEmail")
+    # What the server knows about a drive without its key: when anyone last read it (milliseconds, null if never) and how many bytes
+    # its blocks really take in the storage (live files, old versions and thumbnails together: the server cannot tell them apart;
+    # freed blocks are not counted, unlike the end of the reserved area).
+    last_read_at: int | None = Field(default=None, alias="lastReadAt")
+    # null while it has not been counted yet (the first list after a drive is created or after the server has been updated)
+    stored_bytes: int | None = Field(default=None, alias="storedBytes")

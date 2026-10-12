@@ -491,6 +491,104 @@ async def test_sharing_a_drive_roles_invitations_and_the_public_link(client_as, 
         assert (await anonymous.get(f"/public/{new_token}")).status_code == 404
 
 
+async def test_a_drive_tells_when_anyone_last_read_it_and_how_much_it_holds(client_as, monkeypatch):
+    """The card of a drive shows what the server knows without the key: how many bytes the data area holds, and when ANYONE last read it
+    (the owner, a person it is shared with, or a visitor of the public link), not only the signed-in user."""
+    from app.api.routes import access as access_routes
+    from app.services import activity
+
+    async def fake_send(settings, to, subject, body):
+        return True
+
+    monkeypatch.setattr(access_routes, "send_mail", fake_send)
+
+    def person(label):
+        uid = f"u-{uuid.uuid4()}"
+        return CurrentUser(sub=uid, username=label, email=f"{label}-{uuid.uuid4().hex[:8]}@example.com", name=label.title(),
+                           session_id=f"sid-{uuid.uuid4()}", email_verified=True)
+
+    owner, ben = person("owner"), person("ben")
+
+    async def card(c, drive_id):
+        return next(d for d in (await c.get("/drives")).json() if d["id"] == drive_id)
+
+    async with client_as(ben) as c:
+        assert (await c.get("/userinfo")).status_code == 200
+    async with client_as(owner) as c:
+        drive_id = (await c.post("/drives", json={"title": "Stats", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        fresh = await card(c, drive_id)
+        assert fresh["lastReadAt"] is None and fresh["storedBytes"] == 0  # nothing written, nobody has read it
+
+        session = (await c.post("/sessions", params={"driveId": drive_id, "byteLength": 300})).json()
+        assert (await c.post("/data", params={"sessionId": session["sessionId"], "start": 0}, content=b"x" * 300)).status_code == 204
+        assert (await c.post(f"/sessions/finalize/{session['sessionId']}")).status_code == 204  # the end of an upload: count again
+        assert (await card(c, drive_id))["storedBytes"] == 300
+        assert (await card(c, drive_id))["lastReadAt"] is None  # writing is not reading
+
+        assert (await c.get(f"/ops/{drive_id}/0")).status_code == 200
+        first = (await card(c, drive_id))["lastReadAt"]
+        assert first is not None
+
+        # Another read at once does not move it (it is written at most once a minute) ...
+        assert (await c.get("/data", params={"driveId": drive_id, "start": 0, "end": 10})).status_code == 200
+        assert (await card(c, drive_id))["lastReadAt"] == first
+
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "shared"})).status_code == 200
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": ben.email, "role": "reader"})).status_code == 201
+
+    # ... but a read after a minute does, and it can be somebody else's.
+    activity._recent_drive_reads.clear()
+    async with client_as(ben) as c:
+        assert (await c.get("/data", params={"driveId": drive_id, "start": 0, "end": 10})).status_code == 200
+        seen_by_ben = (await card(c, drive_id))["lastReadAt"]
+        assert seen_by_ben is not None and seen_by_ben > first
+        assert (await card(c, drive_id))["storedBytes"] == 300
+
+    async with client_as(owner) as c:
+        assert (await card(c, drive_id))["lastReadAt"] == seen_by_ben  # the owner sees what Ben read
+
+        public = (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "public"})).json()
+        token = public["publicLink"].rsplit("/p/", 1)[1]
+
+    activity._recent_drive_reads.clear()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as anonymous:
+        app.dependency_overrides.pop(get_current_user, None)
+        assert (await anonymous.get(f"/public/{token}/ops/0")).status_code == 200
+        info = (await anonymous.get(f"/public/{token}")).json()
+        assert info["lastReadAt"] is not None and info["lastReadAt"] > seen_by_ben and info["dataLength"] == 300
+
+    async with client_as(owner) as c:
+        assert (await card(c, drive_id))["lastReadAt"] == info["lastReadAt"]  # a visitor's read counts too
+
+
+async def test_stored_bytes_are_what_the_blocks_take_and_go_down_when_blocks_are_freed(client_as):
+    """The size on a drive's card is the blocks in the storage, not the end of the reserved area, which never shrinks."""
+    async with client_as(USER_A) as c:
+        drive_id = (await c.post("/drives", json={"title": "Freed", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+
+        async def stored():
+            card = next(d for d in (await c.get("/drives")).json() if d["id"] == drive_id)
+            return card["storedBytes"]
+
+        assert await stored() == 0
+        size = 3 * BLOCK_SIZE
+        session = (await c.post("/sessions", params={"driveId": drive_id, "byteLength": size})).json()
+        offset = session["byteOffset"]
+        for block in range(3):
+            body = bytes([block + 1]) * BLOCK_SIZE
+            assert (await c.post("/data", params={"sessionId": session["sessionId"], "start": block * BLOCK_SIZE}, content=body)).status_code == 204
+        assert (await c.post(f"/sessions/finalize/{session['sessionId']}")).status_code == 204
+        assert await stored() == size
+
+        # A file is deleted: its blocks are freed, but the reserved area keeps its end.
+        assert (await c.delete("/data", params={"driveId": drive_id, "start": offset, "end": offset + 2 * BLOCK_SIZE})).status_code == 204
+        assert await stored() == BLOCK_SIZE
+        info = (await c.get(f"/drives/{drive_id}")).json()
+        assert info["storedBytes"] == BLOCK_SIZE
+        async with async_session_factory() as db:
+            assert (await db.get(Drive, uuid.UUID(drive_id))).data_length == size
+
+
 async def test_public_reads_are_rate_limited():
     from app.services.access import _recent_public_reads, public_read_allowed
 

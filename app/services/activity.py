@@ -12,13 +12,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, Request
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.security import CurrentUser
-from app.db.models import UserEvent, UserSession
+from app.db.models import Drive, UserEvent, UserSession
 
 # Event kinds.
 SIGN_IN = "sign_in"
@@ -180,6 +180,25 @@ async def touch_session(db: AsyncSession, user: CurrentUser, ctx: ClientContext,
 
 
 _recent_drive_notes: dict[tuple[str, str, str], float] = {}
+
+
+DRIVE_READ_TOUCH_INTERVAL = 60.0
+_recent_drive_reads: dict[str, float] = {}
+
+
+async def note_drive_read(db: AsyncSession, drive_id) -> None:
+    """Records that the drive was read just now, by anyone: it is what the drive's card shows as "last read". Written at most once a
+    minute per drive (kept in memory, per process), and committed by itself because a read route has nothing else to commit."""
+    key = str(drive_id)
+    moment = time.monotonic()
+    last = _recent_drive_reads.get(key)
+    if last is not None and moment - last < DRIVE_READ_TOUCH_INTERVAL:
+        return
+    if len(_recent_drive_reads) > 10_000:
+        _recent_drive_reads.clear()
+    _recent_drive_reads[key] = moment
+    await db.execute(update(Drive).where(Drive.id == drive_id).values(last_read_at=func.now()))
+    await db.commit()
 
 
 async def note_drive_activity(

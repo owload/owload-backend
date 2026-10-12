@@ -16,9 +16,11 @@ from app.services.activity import (
     ClientContext,
     get_client_context,
     note_drive_activity,
+    note_drive_read,
 )
 from app.services.audit import log_action
 from app.services.storage import BlockStorage, BlockWriteError, get_storage
+from app.services.stored_bytes import mark_stale
 from app.services.storage_targets import get_active_targets
 
 router = APIRouter(prefix="/ops", tags=["ops"])
@@ -36,6 +38,7 @@ async def get_operations(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "startBytePos must not be negative")
     drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
     data = bytes(drive.ops_data[start_byte_pos:])
+    await note_drive_read(db, drive_id)
     await note_drive_activity(db, user, drive_id, drive.title, DRIVE_OPENED, ctx, commit=True)
 
     return Response(content=data, media_type="application/octet-stream")
@@ -81,6 +84,7 @@ async def save_operation(
     except BlockWriteError as exc:
         raise storage_write_failed(exc) from exc
 
+    mark_stale(drive)
     log_action(db, drive_id, user.sub, DriveAction.SAVE_OP, start=start, end=new_length)
     await note_drive_activity(db, user, drive_id, drive.title, DRIVE_WRITTEN, ctx)
     await db.commit()

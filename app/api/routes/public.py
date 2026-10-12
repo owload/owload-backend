@@ -14,7 +14,7 @@ from app.core.config import Settings, get_settings
 from app.db.models import Drive, User
 from app.db.session import get_db
 from app.services.access import PUBLIC, public_read_allowed
-from app.services.activity import ClientContext, get_client_context
+from app.services.activity import ClientContext, get_client_context, note_drive_read
 from app.services.storage import BlockStorage, get_storage
 from app.services.storage_targets import get_active_targets, get_master
 
@@ -36,6 +36,7 @@ class PublicDriveOut(BaseModel):
     created_timestamp: int = Field(alias="createdTimestamp")
     data_length: int = Field(alias="dataLength")
     owner_name: str | None = Field(default=None, alias="ownerName")
+    last_read_at: int | None = Field(default=None, alias="lastReadAt")
 
 
 async def get_public_drive(
@@ -72,6 +73,7 @@ async def get_public_drive_info(
         created_timestamp=int(drive.created_at.timestamp() * 1000),
         data_length=drive.data_length,
         owner_name=(owner.name or None) if owner else None,
+        last_read_at=int(drive.last_read_at.timestamp() * 1000) if drive.last_read_at else None,
     )
 
 
@@ -79,9 +81,11 @@ async def get_public_drive_info(
 async def get_public_operations(
     start_byte_pos: int,
     drive: Drive = Depends(get_public_drive),
+    db: AsyncSession = Depends(get_db),
 ) -> Response:
     if start_byte_pos < 0:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "startBytePos must not be negative")
+    await note_drive_read(db, drive.id)
     return Response(content=bytes(drive.ops_data[start_byte_pos:]), media_type="application/octet-stream", headers=_NO_STORE)
 
 
@@ -98,6 +102,7 @@ async def get_public_data(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end must be >= start")
     length = min(end - start, max(0, drive.data_length - start))
     drive_id: uuid.UUID = drive.id
+    await note_drive_read(db, drive_id)
     master = get_master(await get_active_targets(db, drive_id))
     chunks = storage.iter_range(master, drive_id, start, length)
     return StreamingResponse(

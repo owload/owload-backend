@@ -35,6 +35,7 @@ from app.services.activity import (
 from app.services.audit import log_action
 from app.services.secrets import encrypt_secret
 from app.services.storage import BlockStorage, BlockWriteError, get_storage
+from app.services.stored_bytes import stored_bytes_of
 from app.services.storage_targets import (
     get_active_targets,
     get_or_create_legacy_global_preset,
@@ -46,7 +47,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/drives", tags=["drives"])
 
 
-def _to_drive_info(drive: Drive, role: Role, owner: User | None = None) -> DriveInfoOut:
+def _to_drive_info(drive: Drive, role: Role, owner: User | None = None, stored_bytes: int | None = None) -> DriveInfoOut:
     return DriveInfoOut(
         id=str(drive.id),
         owner_user_id=drive.owner_user_id,
@@ -60,6 +61,8 @@ def _to_drive_info(drive: Drive, role: Role, owner: User | None = None) -> Drive
         people_count=len(drive.acl or {}) if role >= Role.ADMIN else 0,
         owner_name=(owner.name or None) if owner is not None and role != Role.OWNER else None,
         owner_email=owner.email if owner is not None and role != Role.OWNER else None,
+        last_read_at=int(drive.last_read_at.timestamp() * 1000) if drive.last_read_at else None,
+        stored_bytes=stored_bytes if stored_bytes is not None else drive.stored_bytes,
     )
 
 
@@ -143,7 +146,7 @@ async def create_drive(
     log_action(db, drive.id, user.sub, DriveAction.CREATE_DRIVE, title=drive.title)
     record_event(db, user.sub, DRIVE_CREATED, ctx, session_id=session_key(user, ctx), driveId=str(drive.id), title=drive.title)
     await db.commit()
-    return _to_drive_info(drive, Role.OWNER)
+    return _to_drive_info(drive, Role.OWNER, stored_bytes=0)  # nothing is stored in a new drive
 
 
 @router.get("", response_model=list[DriveInfoOut])
@@ -164,7 +167,8 @@ async def get_accessible_drives(
         if other_owners
         else {}
     )
-    return [_to_drive_info(d, role_of(d, user.sub) or Role.READER, owners.get(d.owner_user_id)) for d in drives]
+    stored = await stored_bytes_of(list(drives))
+    return [_to_drive_info(d, role_of(d, user.sub) or Role.READER, owners.get(d.owner_user_id), stored.get(d.id)) for d in drives]
 
 
 @router.get("/{drive_id}", response_model=DriveInfoOut)
@@ -175,7 +179,8 @@ async def get_drive_info(
 ) -> DriveInfoOut:
     drive, role = await get_drive_and_role(db, drive_id, user.sub)
     owner = await db.get(User, drive.owner_user_id) if role != Role.OWNER else None
-    return _to_drive_info(drive, role, owner)
+    stored = await stored_bytes_of([drive])
+    return _to_drive_info(drive, role, owner, stored.get(drive.id))
 
 
 @router.delete("/{drive_id}", status_code=status.HTTP_204_NO_CONTENT)

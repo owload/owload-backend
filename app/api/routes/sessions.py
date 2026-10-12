@@ -17,6 +17,7 @@ from app.services.activity import (
     note_drive_activity,
 )
 from app.services.audit import log_action
+from app.services.stored_bytes import mark_stale
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -86,6 +87,7 @@ async def finish_upload_session(
         raise HTTPException(status.HTTP_409_CONFLICT, "Session is closed")
 
     session.status = SessionStatus.FINISHED
+    mark_stale(drive)
     log_action(
         db, session.drive_id, user.sub, DriveAction.FINALIZE_SESSION,
         session_id=str(session.id), start=session.byte_offset, end=session.byte_offset + session.byte_length,

@@ -19,6 +19,7 @@ from app.services.activity import (
     ClientContext,
     get_client_context,
     note_drive_activity,
+    note_drive_read,
 )
 from app.services.audit import log_action
 from app.services.storage import (
@@ -28,6 +29,7 @@ from app.services.storage import (
     get_storage,
 )
 from app.services.storage_targets import get_active_targets, get_master
+from app.services.stored_bytes import mark_stale
 
 router = APIRouter(prefix="/data", tags=["data"])
 
@@ -90,6 +92,7 @@ async def get_data_block(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end must be >= start")
 
     drive = await get_accessible_drive_or_404(db, drive_id, user.sub)
+    await note_drive_read(db, drive_id)
     await note_drive_activity(db, user, drive_id, drive.title, DRIVE_FILES_READ, ctx, commit=True)
     available = max(0, drive.data_length - start)
     length = min(end - start, available)
@@ -127,6 +130,7 @@ async def free_data_range(
             status.HTTP_502_BAD_GATEWAY, f"Storage backend failed to delete some blocks: {exc}"
         ) from exc
 
+    mark_stale(drive)
     log_action(
         db, drive_id, user.sub, DriveAction.DELETE_DATA,
         start=start, end=end, blocks_deleted=blocks_deleted,

@@ -147,6 +147,16 @@ class Drive(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # When anyone last read the drive (its operations or its data), signed in or by the public link; at most once a minute
+    # (see note_drive_read). Not who: this is for the drive's own card, not for the activity of a person.
+    last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # How many bytes the drive's blocks really take in the master storage, counted by listing it (see app/services/stored_bytes.py), and
+    # when. `data_length` is not that: it is the end of the reserved area, never shrinks, and says nothing about blocks that were freed.
+    # An older `stored_bytes_at` than "now - the time to live", or null, means the number is to be counted again.
+    stored_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    stored_bytes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
 
 class SessionStatus:
     ACTIVE = 0

@@ -282,6 +282,19 @@ class BlockStorage:
                 ranges.append((start, end))
         return ranges
 
+    async def sum_stored_bytes(self, target: ResolvedTarget, drive_id: uuid.UUID) -> int:
+        """How many bytes the blocks of a drive take in a storage: the sizes of its block objects, added up from the listing (the sizes
+        come with the keys, nothing is read). A freed block is not there, so unlike the end of the reserved area this goes down when
+        files are deleted. Reads MASTER only, and costs one request per thousand blocks."""
+        prefix = f"data/{drive_id}/"
+        total = 0
+        async with self._client_ctx(target) as client:
+            paginator = client.get_paginator("list_objects_v2")
+            async for page in paginator.paginate(Bucket=target.bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    total += int(obj["Size"])
+        return total
+
     async def iter_range(self, target: ResolvedTarget, drive_id: uuid.UUID, start: int, length: int) -> AsyncIterator[bytes]:
         """Yields the requested range one block-chunk at a time, reading from
         MASTER only, so a caller streaming this to a client (e.g. a
