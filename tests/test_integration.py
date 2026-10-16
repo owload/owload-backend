@@ -589,6 +589,40 @@ async def test_stored_bytes_are_what_the_blocks_take_and_go_down_when_blocks_are
             assert (await db.get(Drive, uuid.UUID(drive_id))).data_length == size
 
 
+async def test_storage_usage_of_a_user_is_split_into_owload_storage_and_their_own_s3(client_as):
+    """The side panel and the profile page show what the drives the user owns take in Owload's storage (S3 presets, limited by the plan)
+    and, apart, in the user's own S3 (not limited). A drive that is only shared with the user is not theirs and does not count."""
+    bucket = f"test-usage-{uuid.uuid4().hex[:12]}"
+    await _ensure_minio_bucket(bucket)
+    uid = f"u-{uuid.uuid4()}"
+    me = CurrentUser(sub=uid, username="usage", email=f"usage-{uuid.uuid4().hex[:8]}@example.com", name="Usage", session_id=f"sid-{uuid.uuid4()}", email_verified=True)
+
+    async def write(c, drive_id, size):
+        session = (await c.post("/sessions", params={"driveId": drive_id, "byteLength": size})).json()
+        assert (await c.post("/data", params={"sessionId": session["sessionId"], "start": 0}, content=b"x" * size)).status_code == 204
+        assert (await c.post(f"/sessions/finalize/{session['sessionId']}")).status_code == 204
+
+    async with client_as(me) as c:
+        empty = (await c.get("/userinfo/storage")).json()
+        assert empty == {"presetBytes": 0, "customBytes": 0, "presetDrives": 0, "customDrives": 0, "complete": True}
+
+        in_owload = (await c.post("/drives", json={"title": "In Owload", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        own_s3 = (await c.post("/drives", json={"title": "Own S3", "keyNonce": "aa", "counterNonce": "bb", "customConfig": _custom_config(bucket)})).json()["id"]
+        await write(c, in_owload, 300)
+        await write(c, own_s3, 500)
+
+        usage = (await c.get("/userinfo/storage")).json()
+        assert usage == {"presetBytes": 300, "customBytes": 500, "presetDrives": 1, "customDrives": 1, "complete": True}
+
+        # the size of a drive is what its master holds
+        info = (await c.get(f"/drives/{in_owload}")).json()
+        assert info["storedBytes"] == 300
+
+    other = CurrentUser(sub=f"u-{uuid.uuid4()}", username="other", email=f"other-{uuid.uuid4().hex[:8]}@example.com", name="Other", session_id=f"sid-{uuid.uuid4()}", email_verified=True)
+    async with client_as(other) as c:
+        assert (await c.get("/userinfo/storage")).json()["presetBytes"] == 0  # somebody else's drives are not mine
+
+
 async def test_public_reads_are_rate_limited():
     from app.services.access import _recent_public_reads, public_read_allowed
 

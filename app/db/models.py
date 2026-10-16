@@ -294,4 +294,9 @@ class DriveStorageTarget(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # How many bytes this drive's blocks take in this storage, counted by listing it (app/services/stored_bytes.py); null until counted. A
+    # drive's master and its slaves each hold a copy, so this is the physical use of the storage, whereas `drives.stored_bytes` is the size
+    # of the drive.
+    stored_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
     preset: Mapped[S3Preset | None] = relationship()

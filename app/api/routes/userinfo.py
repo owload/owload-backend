@@ -15,6 +15,7 @@ from app.schemas.user import (
     AvatarOut,
     SaveUserBasicInfoIn,
     SetAvatarPresetIn,
+    StorageUsageOut,
     UserActivityPageOut,
     UserBasicInfoOut,
     UserEventOut,
@@ -23,8 +24,26 @@ from app.schemas.user import (
 from app.services import access, activity
 from app.services.activity import ClientContext, get_client_context
 from app.services.avatar_image import AvatarImageError, make_avatar_jpeg
+from app.services.stored_bytes import storage_usage_of
 
 router = APIRouter(prefix="/userinfo", tags=["userinfo"])
+
+
+@router.get("/storage", response_model=StorageUsageOut, response_model_by_alias=True)
+async def get_storage_usage(
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> StorageUsageOut:
+    """What the drives the user owns take in Owload's storage and in their own S3 (decision 0033). Counted by listing the storages and
+    kept for a few minutes, so a first answer may be `complete: false`; ask again in a few seconds."""
+    usage = await storage_usage_of(db, user.sub)
+    return StorageUsageOut(
+        preset_bytes=usage.preset_bytes,
+        custom_bytes=usage.custom_bytes,
+        preset_drives=usage.preset_drives,
+        custom_drives=usage.custom_drives,
+        complete=usage.complete,
+    )
 
 
 @router.get("/search/{search}", response_model=list[UserBasicInfoOut])

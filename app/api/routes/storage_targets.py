@@ -36,6 +36,7 @@ from app.services.backfill import BackfillService, get_backfill_service
 from app.services.secrets import encrypt_secret
 from app.services.storage import BlockStorage, get_storage
 from app.services.storage_targets import ResolvedTarget, resolve_target
+from app.services.stored_bytes import mark_stale
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,7 @@ async def add_storage_target(
         )
 
     db.add(target)
+    mark_stale(drive)  # a new storage has no count yet
     record_event(
         db, user.sub, STORAGE_TARGET_ADDED, ctx, session_id=session_key(user, ctx),
         driveId=str(drive_id), title=drive.title,
@@ -354,6 +356,7 @@ async def remove_storage_target(
         )
 
     await db.delete(target)
+    mark_stale(drive)
     record_event(
         db, user.sub, STORAGE_TARGET_REMOVED, ctx, session_id=session_key(user, ctx),
         driveId=str(drive_id), title=drive.title,

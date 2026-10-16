@@ -8,14 +8,17 @@ import asyncio
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, update
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.db.models import Drive
+from app.db.models import Drive, DriveStorageTarget, StorageTargetRole, StorageTargetStatus
 from app.db.session import async_session_factory
 from app.services.storage import get_storage
-from app.services.storage_targets import get_active_targets, get_master
+from app.services.storage_targets import resolve_target
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +41,46 @@ def is_fresh(drive: Drive, now: datetime | None = None) -> bool:
 
 
 async def _count(drive_id: uuid.UUID) -> int | None:
-    """Counts the drive's blocks in its master storage and keeps the result; None if the storage could not be asked."""
+    """Counts the drive's blocks in each of its storages and keeps the results: in every storage's own row (what the user's usage is added
+    up from), and the master's also on the drive (the size of the drive). A storage that cannot be asked keeps its last number; None is
+    returned (and the drive stays to be counted again) when the master could not be asked."""
     try:
         async with async_session_factory() as db:
-            master = get_master(await get_active_targets(db, drive_id))
-            total = await get_storage().sum_stored_bytes(master, drive_id)
-            await db.execute(update(Drive).where(Drive.id == drive_id).values(stored_bytes=total, stored_bytes_at=func.now()))
+            rows = (
+                await db.execute(
+                    select(DriveStorageTarget)
+                    .options(selectinload(DriveStorageTarget.preset))
+                    .where(
+                        DriveStorageTarget.drive_id == drive_id,
+                        DriveStorageTarget.status.in_([StorageTargetStatus.ACTIVE, StorageTargetStatus.PROVISIONING]),
+                    )
+                )
+            ).scalars().all()
+            storage = get_storage()
+
+            async def count_one(row: DriveStorageTarget) -> int | None:
+                try:
+                    return await storage.sum_stored_bytes(resolve_target(row), drive_id)
+                except Exception:  # one storage that is down must not hide the others
+                    logger.warning("Could not count drive %s in storage %s", drive_id, row.id, exc_info=True)
+                    return None
+
+            totals = await asyncio.gather(*(count_one(row) for row in rows))
+            master_total: int | None = None
+            for row, total in zip(rows, totals):
+                if total is None:
+                    continue
+                row.stored_bytes = total
+                if row.role == StorageTargetRole.MASTER:
+                    master_total = total
+            if master_total is None:
+                await db.commit()
+                _failed_at[drive_id] = time.monotonic()
+                return None
+            await db.execute(update(Drive).where(Drive.id == drive_id).values(stored_bytes=master_total, stored_bytes_at=func.now()))
             await db.commit()
             _failed_at.pop(drive_id, None)
-            return total
+            return master_total
     except Exception:  # a storage that is down must not break the list of drives
         _failed_at[drive_id] = time.monotonic()
         logger.warning("Could not count the stored bytes of drive %s", drive_id, exc_info=True)
@@ -86,3 +120,48 @@ async def stored_bytes_of(drives: list[Drive], wait_seconds: float = WAIT_FOR_CO
 def mark_stale(drive: Drive) -> None:
     """Something was written or freed: the number is to be counted again the next time somebody asks. Commit with the caller's change."""
     drive.stored_bytes_at = None
+
+
+@dataclass(frozen=True)
+class StorageUsage:
+    """What the drives a user owns take in the storages: in Owload's own (the presets) and in the user's own S3 (custom configurations)."""
+
+    preset_bytes: int
+    custom_bytes: int
+    preset_drives: int
+    custom_drives: int
+    # False while some storage of some drive has not been counted yet (the numbers are then a part of the whole)
+    complete: bool
+
+
+async def storage_usage_of(db: AsyncSession, user_id: str, wait_seconds: float = WAIT_FOR_COUNT_SECONDS) -> StorageUsage:
+    """Adds up, over the drives the user owns, the bytes each of their storages holds. A drive shared with the user is on its owner's
+    account and does not count. What is stale is counted again first (see `stored_bytes_of` for how much is waited for)."""
+    drives = list((await db.execute(select(Drive).where(Drive.owner_user_id == user_id))).scalars().all())
+    if drives:
+        await stored_bytes_of(drives, wait_seconds)
+    rows = (
+        await db.execute(
+            select(DriveStorageTarget.drive_id, DriveStorageTarget.preset_id.is_not(None), DriveStorageTarget.stored_bytes)
+            .join(Drive, Drive.id == DriveStorageTarget.drive_id)
+            .where(
+                Drive.owner_user_id == user_id,
+                DriveStorageTarget.status.in_([StorageTargetStatus.ACTIVE, StorageTargetStatus.PROVISIONING]),
+            )
+        )
+    ).all()
+    preset = custom = 0
+    preset_drives: set[uuid.UUID] = set()
+    custom_drives: set[uuid.UUID] = set()
+    complete = True
+    for drive_id, is_preset, stored in rows:
+        if stored is None:
+            complete = False
+            continue
+        if is_preset:
+            preset += stored
+            preset_drives.add(drive_id)
+        else:
+            custom += stored
+            custom_drives.add(drive_id)
+    return StorageUsage(preset, custom, len(preset_drives), len(custom_drives), complete)

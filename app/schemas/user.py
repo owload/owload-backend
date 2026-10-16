@@ -89,3 +89,16 @@ class UserActivityPageOut(BaseModel):
 
     items: list[UserEventOut]
     next: int | None
+
+
+class StorageUsageOut(BaseModel):
+    """What the drives the user owns take in the storages, for the usage shown in the side panel and on the profile page. Owload's own
+    storage (S3 presets) is limited by the plan; the user's own S3 is not."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    preset_bytes: int = Field(alias="presetBytes")
+    custom_bytes: int = Field(alias="customBytes")
+    preset_drives: int = Field(alias="presetDrives")
+    custom_drives: int = Field(alias="customDrives")
+    complete: bool
