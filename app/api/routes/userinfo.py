@@ -297,7 +297,8 @@ async def get_sessions(
     db: AsyncSession = Depends(get_db),
     ctx: ClientContext = Depends(get_client_context),
 ) -> list[UserSessionOut]:
-    """The sessions the user is signed in with: not signed out, not revoked, seen in the last 30 days."""
+    """The devices the user is signed in on: sessions not signed out, not revoked, seen in the last 30 days, with the sessions of one
+    browser from one address listed once (each sign-in is a session of its own)."""
     since = datetime.now(timezone.utc) - activity.SESSION_LIST_WINDOW
     rows = (
         await db.execute(
@@ -317,7 +318,7 @@ async def get_sessions(
             id=row.id, device=row.device, mobile=row.mobile, ip=row.ip, started_at=row.started_at,
             last_seen_at=row.last_seen_at, current=row.id == current,
         )
-        for row in rows
+        for row in activity.collapse_sessions(list(rows), current)
     ]
 
 
@@ -332,7 +333,14 @@ async def end_current_session(
     key = activity.session_key(user, ctx)
     row = await db.get(UserSession, key)
     if row is not None and row.user_id == user.sub and row.ended_at is None:
-        row.ended_at = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        row.ended_at = now
+        # the older sessions of this device (the same browser from the same address) end with it, or they would be listed as another device
+        await db.execute(
+            update(UserSession)
+            .where(activity.same_device(user.sub, row), UserSession.id != key, UserSession.ended_at.is_(None), UserSession.revoked_at.is_(None))
+            .values(ended_at=now)
+        )
         activity.record_event(db, user.sub, activity.SIGN_OUT, ctx, session_id=key)
         await db.commit()
 
@@ -382,7 +390,20 @@ async def revoke_session(
     if row.id == key:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This is the current session")
     if row.revoked_at is None:
-        row.revoked_at = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        # every session of that device is refused, not only the one that was listed: the others are its older sign-ins
+        revoked = (
+            await db.execute(
+                update(UserSession)
+                .where(activity.same_device(user.sub, row), UserSession.id != key, UserSession.revoked_at.is_(None), UserSession.ended_at.is_(None))
+                .values(revoked_at=now)
+                .returning(UserSession.id)
+            )
+        ).scalars().all()
+        if row.id not in revoked:
+            row.revoked_at = now
+            revoked.append(row.id)
         activity.record_event(db, user.sub, activity.SESSION_REVOKED, ctx, session_id=key, device=row.device)
         await db.commit()
-        activity.remember_revoked(row.id)
+        for revoked_id in revoked:
+            activity.remember_revoked(revoked_id)

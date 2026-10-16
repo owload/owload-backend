@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, Request
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,6 +47,7 @@ STORAGE_TARGET_ADDED = "storage_target_added"
 STORAGE_TARGET_MAIN_CHANGED = "storage_target_main_changed"
 STORAGE_TARGET_REMOVED = "storage_target_removed"
 
+UNKNOWN_DEVICE = "Unknown device"
 SEEN_WRITE_INTERVAL = timedelta(seconds=60)
 NEW_VISIT_GAP = timedelta(minutes=30)
 # A session that has not been seen for this long is no longer listed as signed in.
@@ -102,13 +103,13 @@ _SYSTEMS = (
 def describe_device(user_agent: str | None) -> tuple[str, bool]:
     """A short label for a browser ("Chrome on macOS") and whether it is a phone, from its User-Agent."""
     if not user_agent:
-        return "Unknown device", False
+        return UNKNOWN_DEVICE, False
     browser = next((name for name, pattern in _BROWSERS if pattern.search(user_agent)), None)
     system = next((name for name, pattern in _SYSTEMS if pattern.search(user_agent)), None)
     mobile = bool(re.search(r"\b(iPhone|iPod|Android.+Mobile|Mobile)\b", user_agent))
     if browser and system:
         return f"{browser} on {system}", mobile
-    return browser or system or "Unknown device", mobile
+    return browser or system or UNKNOWN_DEVICE, mobile
 
 
 def get_client_context(request: Request, settings: Settings = Depends(get_settings)) -> ClientContext:
@@ -122,6 +123,30 @@ def session_key(user: CurrentUser, ctx: ClientContext) -> str:
     if user.session_id:
         return user.session_id
     return hashlib.sha256(f"{user.sub}|{ctx.user_agent or ''}".encode()).hexdigest()[:32]
+
+
+def collapse_sessions(rows: list[UserSession], current_id: str | None) -> list[UserSession]:
+    """One row for each device. Every sign-in has a session of its own, so the same browser on the same system from the same address that
+    has signed in again (a session that ran out, a closed window, a private window) leaves older sessions behind: they are the same device
+    and are not listed again. A device is told by its description ("Chrome on macOS", not the full browser string, whose version changes with
+    every update) and its address. The row kept is the current session if the device has it, else the one seen last. `rows` come with the
+    latest first."""
+    chosen: dict[tuple, UserSession] = {}
+    for row in rows:
+        key = (row.device, row.ip) if row.device != UNKNOWN_DEVICE else (row.id,)  # an unknown device is not guessed to be another's
+        kept = chosen.get(key)
+        if kept is None or (row.id == current_id and kept.id != current_id):
+            chosen[key] = row
+    return list(chosen.values())
+
+
+def same_device(user_id: str, session: UserSession):
+    """The condition for the sessions of the same device as `session` (see `collapse_sessions`), itself included."""
+    return and_(
+        UserSession.user_id == user_id,
+        UserSession.device == session.device if session.device != UNKNOWN_DEVICE else UserSession.id == session.id,
+        UserSession.ip.is_not_distinct_from(session.ip),
+    )
 
 
 def record_event(db: AsyncSession, user_id: str, kind: str, ctx: ClientContext, session_id: str | None = None, **details) -> None:

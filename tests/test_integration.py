@@ -262,6 +262,75 @@ async def test_account_activity_and_sessions(client_as):
         assert (await c.get("/userinfo/sessions", headers=ios)).json() == []
 
 
+async def test_the_same_device_signing_in_again_is_listed_once(client_as):
+    """Every sign-in is a session of its own, so a browser that signs in again from the same address leaves older sessions behind. They
+    are the same device: listed once, signed out together, and not listed again as "another device" when the newest one signs out."""
+    uid = f"u-{uuid.uuid4()}"
+    email = f"{uuid.uuid4()}@example.com"
+    mac_old = CurrentUser(sub=uid, username="t", email=email, session_id=f"sid-{uuid.uuid4()}")
+    mac_new = CurrentUser(sub=uid, username="t", email=email, session_id=f"sid-{uuid.uuid4()}")
+    mac_newest = CurrentUser(sub=uid, username="t", email=email, session_id=f"sid-{uuid.uuid4()}")
+    phone = CurrentUser(sub=uid, username="t", email=email, session_id=f"sid-{uuid.uuid4()}")
+    mac, ios = {"user-agent": CHROME_MAC}, {"user-agent": SAFARI_IPHONE}
+
+    for user in (mac_old, mac_new, mac_newest):
+        async with client_as(user) as c:
+            assert (await c.get("/userinfo", headers=mac)).status_code == 200
+    async with client_as(phone) as c:
+        assert (await c.get("/userinfo", headers=ios)).status_code == 200
+        sessions = (await c.get("/userinfo/sessions", headers=ios)).json()
+        assert sorted(s["device"] for s in sessions) == ["Chrome on macOS", "Safari on iOS"]  # three sign-ins of the laptop, one device
+        laptop = next(s for s in sessions if not s["current"])
+        assert laptop["id"] == mac_newest.session_id  # the one seen last stands for the device
+
+    async with client_as(mac_old) as c:
+        # the old session is the device too: it is listed as the current one when it is the one in use
+        current = [s for s in (await c.get("/userinfo/sessions", headers=mac)).json() if s["current"]]
+        assert [s["id"] for s in current] == [mac_old.session_id]
+
+    async with client_as(phone) as c:
+        assert (await c.delete(f"/userinfo/sessions/{laptop['id']}", headers=ios)).status_code == 204
+        assert [s["device"] for s in (await c.get("/userinfo/sessions", headers=ios)).json()] == ["Safari on iOS"]
+
+    # every session of that device is refused, not only the one that was listed
+    for user in (mac_old, mac_new, mac_newest):
+        async with client_as(user) as c:
+            assert (await c.get("/userinfo", headers=mac)).status_code == 401
+
+
+async def test_a_browser_update_does_not_make_a_new_device(client_as):
+    """The version in the browser string changes with every update; the device is told by its description and its address."""
+    uid = f"u-{uuid.uuid4()}"
+    email = f"{uuid.uuid4()}@example.com"
+    before = CurrentUser(sub=uid, username="t", email=email, session_id=f"sid-{uuid.uuid4()}")
+    after = CurrentUser(sub=uid, username="t", email=email, session_id=f"sid-{uuid.uuid4()}")
+    updated = CHROME_MAC.replace("Chrome/", "Chrome/9")
+    assert updated != CHROME_MAC
+    async with client_as(before) as c:
+        assert (await c.get("/userinfo", headers={"user-agent": CHROME_MAC})).status_code == 200
+    async with client_as(after) as c:
+        assert (await c.get("/userinfo", headers={"user-agent": updated})).status_code == 200
+        sessions = (await c.get("/userinfo/sessions", headers={"user-agent": updated})).json()
+        assert [(s["device"], s["current"]) for s in sessions] == [("Chrome on macOS", True)]
+
+
+async def test_signing_out_of_a_device_ends_its_older_sign_ins_too(client_as):
+    uid = f"u-{uuid.uuid4()}"
+    email = f"{uuid.uuid4()}@example.com"
+    old = CurrentUser(sub=uid, username="t", email=email, session_id=f"sid-{uuid.uuid4()}")
+    new = CurrentUser(sub=uid, username="t", email=email, session_id=f"sid-{uuid.uuid4()}")
+    mac, ios = {"user-agent": CHROME_MAC}, {"user-agent": SAFARI_IPHONE}
+    other = CurrentUser(sub=uid, username="t", email=email, session_id=f"sid-{uuid.uuid4()}")
+    for user, headers in ((old, mac), (new, mac), (other, ios)):
+        async with client_as(user) as c:
+            assert (await c.get("/userinfo", headers=headers)).status_code == 200
+    async with client_as(new) as c:
+        assert (await c.delete("/userinfo/sessions/current", headers=mac)).status_code == 204
+    async with client_as(other) as c:
+        sessions = (await c.get("/userinfo/sessions", headers=ios)).json()
+        assert [s["device"] for s in sessions] == ["Safari on iOS"]  # the laptop is gone, not shown as an older sign-in of it
+
+
 async def test_activity_paging_and_signing_out_other_sessions(client_as):
     uid = f"u-{uuid.uuid4()}"
     users = [CurrentUser(sub=uid, username="t", email=f"{uid}@example.com", session_id=f"sid-{uuid.uuid4()}") for _ in range(3)]
