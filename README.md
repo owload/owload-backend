@@ -1,6 +1,6 @@
-# owload-back
+# owload-backend
 
-The backend for owload-front (an encrypted virtual "drive" with client-side
+The backend for owload-frontend (an encrypted virtual "drive" with client-side
 encryption). The server never sees plaintext — both the append-only operation
 log and the drive's byte data area are opaque ciphertext from the backend's
 point of view.
@@ -100,7 +100,7 @@ pytest
 ## Authentication
 
 The token is passed in the **`x-access-token`** header (not `Authorization:
-Bearer`) — that is how the axios interceptor in `owload-front` sends it
+Bearer`) — that is how the axios interceptor in `owload-frontend` sends it
 (`src/auth-context-provider.tsx`, `src/engine/api/api.ts`).
 
 ## API
@@ -400,7 +400,7 @@ docker compose logs -f compaction-worker
 15 minutes:
 
 ```cron
-*/15 * * * * cd /opt/owload-back && /opt/owload-back/.venv/bin/python -m app.compaction_worker >> /var/log/owl-compaction.log 2>&1
+*/15 * * * * cd /opt/owload-backend && /opt/owload-backend/.venv/bin/python -m app.compaction_worker >> /var/log/owl-compaction.log 2>&1
 ```
 
 ### Backfill of new slave targets

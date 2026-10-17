@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="owload-backend" \
       org.opencontainers.image.description="The API of Owload, an encrypted virtual drive" \
-      org.opencontainers.image.source="https://github.com/owload/owload-back"
+      org.opencontainers.image.source="https://github.com/owload/owload-backend"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

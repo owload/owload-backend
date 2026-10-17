@@ -53,7 +53,7 @@ async def save_operation(
     storage: BlockStorage = Depends(get_storage),
     ctx: ClientContext = Depends(get_client_context),
 ) -> None:
-    # Invariant relied on by the frontend: owload-front's DriveLogs correlates
+    # Invariant relied on by the frontend: owload-frontend's DriveLogs correlates
     # this call's SAVE_OP audit-log entry with an FsOperationWrapper by matching
     # byte offsets (attributes.start + OPS_SEPARATOR_BYTE_LENGTH === op.startBytePos),
     # which only works because SerializingOpsRepository/SplittingOpsRepository

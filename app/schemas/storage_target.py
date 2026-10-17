@@ -23,7 +23,7 @@ class AddStorageTargetIn(BaseModel):
 
 class StorageTargetOut(BaseModel):
     """Shape fixed by the frontend's DriveStorageTarget interface
-    (owload-front/src/engine/backend/drive-backend.ts) — tier is
+    (owload-frontend/src/engine/backend/drive-backend.ts) — tier is
     lowercase ('hot'/'cold') to match its S3PresetTier union."""
 
     model_config = ConfigDict(populate_by_name=True)

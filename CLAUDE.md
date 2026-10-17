@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Full text: `../owload-docs/CONTRIBUTING.md`. In short:
 
 - **Never commit or push on your own — only when the owner explicitly says so** (each time; a past instruction does not carry over). Until then leave the work uncommitted in the working tree.
-- Work comes from tasks in `../owload-docs/epics/`. When asked, a task is committed **at the same time in `owload-docs`, `owload-back` and `owload-front`** (docs always get the task status / architecture update); commit messages reference the same task.
+- Work comes from tasks in `../owload-docs/epics/`. When asked, a task is committed **at the same time in `owload-docs`, `owload-backend` and `owload-frontend`** (docs always get the task status / architecture update); commit messages reference the same task.
 - **Before every push, in every repository, check the diff:**
   - (a) no sensitive data — secrets, tokens/JWTs, keys, `.env` values, real hostnames/IPs, personal data or machine-specific paths;
   - (b) security does not get worse — the server must never receive, store or log the password, `K_master` or any derived key, plaintext content/names/paths, or anything outside the API contract (`../owload-docs/architecture/backend.md`); crypto changes need an ADR.
@@ -24,7 +24,7 @@ point of view. Encryption/decryption and filesystem structure live entirely
 on the client.
 
 **Contract note:** this backend uses `drive`/`driveId` terminology
-(`/drives`, `?driveId=`), and the frontend (`owload-front`,
+(`/drives`, `?driveId=`), and the frontend (`owload-frontend`,
 `src/engine/backend/*.ts`) has been migrated to the same contract. The old
 `/containers`/`?containerId=` naming no longer exists on either side.
 
@@ -89,7 +89,7 @@ atomically extends it (`UPDATE ... RETURNING`) and returns the
 `POST /sessions/finalize/{sessionId}` only flips a status flag — bytes are
 already "live" the moment they're written, finalize doesn't gate anything.
 This mirrors the frontend's own in-memory mock backend
-(`owload-front/src/engine/backend/test/mocks/filesystem.mock.ts`), which is
+(`owload-frontend/src/engine/backend/test/mocks/filesystem.mock.ts`), which is
 the closest thing to a spec for this byte-range/session behavior.
 
 ### Block storage (`app/services/storage.py`)
@@ -169,7 +169,7 @@ another read endpoint and wondering why it suddenly needs a `db` dependency.
 
 JWT arrives via the **`x-access-token` header**, not `Authorization:
 Bearer` — this is what the actual frontend's axios interceptor sends
-(`owload-front/src/auth-context-provider.tsx`). `app/core/security.py`
+(`owload-frontend/src/auth-context-provider.tsx`). `app/core/security.py`
 verifies against Keycloak's JWKS (cached, refetched once on unknown `kid`
 before failing). No local user/password store — `users` table
 (`app/db/models.py`) is just a lazily-created profile (name/email) for
