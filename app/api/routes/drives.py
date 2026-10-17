@@ -21,7 +21,7 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
-from app.schemas.drive import CreateDriveIn, DeleteDriveIn, DriveInfoOut
+from app.schemas.drive import CreateDriveIn, DeleteDriveIn, DriveInfoOut, StorageLimitIn
 from app.schemas.drive_action import DriveActionLogOut
 from app.services.access import ROLE_LABELS, SHARED, Role, role_of
 from app.services.activity import (
@@ -63,6 +63,7 @@ def _to_drive_info(drive: Drive, role: Role, owner: User | None = None, stored_b
         owner_email=owner.email if owner is not None and role != Role.OWNER else None,
         last_read_at=int(drive.last_read_at.timestamp() * 1000) if drive.last_read_at else None,
         stored_bytes=stored_bytes if stored_bytes is not None else drive.stored_bytes,
+        storage_limit_bytes=drive.storage_limit_bytes,
     )
 
 
@@ -181,6 +182,22 @@ async def get_drive_info(
     owner = await db.get(User, drive.owner_user_id) if role != Role.OWNER else None
     stored = await stored_bytes_of([drive])
     return _to_drive_info(drive, role, owner, stored.get(drive.id))
+
+
+@router.put("/{drive_id}/storage-limit", response_model=DriveInfoOut)
+async def set_storage_limit(
+    drive_id: uuid.UUID,
+    payload: StorageLimitIn,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DriveInfoOut:
+    """Sets the most the drive may store, or takes the limit off (null: only the owner's limit holds the drive). Only the owner: the limit
+    is about their storage. A limit below what the drive already holds is allowed; it stops new writes and removes nothing (decisions/0036)."""
+    drive, role = await get_drive_and_role(db, drive_id, user.sub, Role.OWNER)
+    drive.storage_limit_bytes = payload.limit_bytes
+    await db.commit()
+    stored = await stored_bytes_of([drive])
+    return _to_drive_info(drive, role, None, stored.get(drive.id))
 
 
 @router.delete("/{drive_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     # Reads of the public drives of one IP address per minute (the link is the only secret of a public drive).
     public_reads_per_minute: int = 600
 
+    # How much a user may store in Owload's own storage (the S3 presets), summed over the drives they own, in bytes: the one figure of the
+    # free plan, the same for everybody. The user's own S3 is not limited by it. Change it and restart the backend to change it for everyone.
+    free_plan_storage_bytes: int = 3 * 1024**3
+    # An upload that started this long ago and was never finished no longer holds the room it reserved.
+    upload_reservation_hours: int = 24
+
     # Infra-secret encryption (S3 credentials in s3_presets/drive_storage_targets.custom_config)
     # — a backend-only Fernet key, unrelated to the client's data-encryption key.
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"

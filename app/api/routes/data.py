@@ -60,6 +60,7 @@ async def save_data_block(
     except BlockWriteError as exc:
         raise storage_write_failed(exc) from exc
     session.last_write_at = datetime.now(UTC)
+    session.written_bytes = min(session.byte_length, session.written_bytes + len(body))
     await note_drive_activity(db, user, session.drive_id, drive.title, DRIVE_WRITTEN, ctx)
     await db.commit()
 

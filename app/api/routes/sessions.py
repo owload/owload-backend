@@ -5,6 +5,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_accessible_drive_or_404
+from app.core.config import Settings, get_settings
 from app.core.security import CurrentUser, get_current_user
 from app.db.models import Drive, DriveAction, SessionStatus, UploadSession
 from app.db.session import get_db
@@ -17,6 +18,7 @@ from app.services.activity import (
     note_drive_activity,
 )
 from app.services.audit import log_action
+from app.services.quota import ensure_room
 from app.services.stored_bytes import mark_stale
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -41,8 +43,11 @@ async def start_upload_session(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     ctx: ClientContext = Depends(get_client_context),
+    settings: Settings = Depends(get_settings),
 ) -> SessionInfoOut:
     drive = await get_accessible_drive_or_404(db, drive_id, user.sub, Role.WRITER)
+    # Whoever writes, the drive's limit and its owner's must have room for it (decisions/0036).
+    await ensure_room(db, drive, user.sub, byte_length, settings)
 
     # Atomically reserve [old data_length, old data_length + byte_length) for this session.
     result = await db.execute(

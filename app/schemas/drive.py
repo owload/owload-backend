@@ -79,3 +79,13 @@ class DriveInfoOut(BaseModel):
     last_read_at: int | None = Field(default=None, alias="lastReadAt")
     # null while it has not been counted yet (the first list after a drive is created or after the server has been updated)
     stored_bytes: int | None = Field(default=None, alias="storedBytes")
+    # The most the drive may store, set by its owner; null: none of its own (the owner's limit is the one that holds it).
+    storage_limit_bytes: int | None = Field(default=None, alias="storageLimitBytes")
+
+
+class StorageLimitIn(BaseModel):
+    """The owner's limit of a drive in bytes, or null to have none of its own."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    limit_bytes: int | None = Field(alias="limitBytes", ge=1, le=2**50)

@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 
-# The preset pictures of the profile; the client draws them. Keep in step with owload-front
+# The preset pictures of the profile; the client draws them. Keep in step with owload-frontend
 # (src/components/profile/avatar-presets.tsx). The initials of the user's name are the default (kind "default"), not a preset.
 AVATAR_PRESETS = (
     "rings", "arcs", "split", "stripes", "dots", "waves", "cipher", "peaks", "keyhole", "moon", "bars",
@@ -102,3 +102,5 @@ class StorageUsageOut(BaseModel):
     preset_drives: int = Field(alias="presetDrives")
     custom_drives: int = Field(alias="customDrives")
     complete: bool
+    # What the plan allows in Owload's own storage (the same for everybody; the user's own S3 is not held by it).
+    limit_bytes: int = Field(alias="limitBytes")

@@ -673,7 +673,7 @@ async def test_storage_usage_of_a_user_is_split_into_owload_storage_and_their_ow
 
     async with client_as(me) as c:
         empty = (await c.get("/userinfo/storage")).json()
-        assert empty == {"presetBytes": 0, "customBytes": 0, "presetDrives": 0, "customDrives": 0, "complete": True}
+        assert empty == {"presetBytes": 0, "customBytes": 0, "presetDrives": 0, "customDrives": 0, "complete": True, "limitBytes": get_settings().free_plan_storage_bytes}
 
         in_owload = (await c.post("/drives", json={"title": "In Owload", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
         own_s3 = (await c.post("/drives", json={"title": "Own S3", "keyNonce": "aa", "counterNonce": "bb", "customConfig": _custom_config(bucket)})).json()["id"]
@@ -681,7 +681,7 @@ async def test_storage_usage_of_a_user_is_split_into_owload_storage_and_their_ow
         await write(c, own_s3, 500)
 
         usage = (await c.get("/userinfo/storage")).json()
-        assert usage == {"presetBytes": 300, "customBytes": 500, "presetDrives": 1, "customDrives": 1, "complete": True}
+        assert usage == {"presetBytes": 300, "customBytes": 500, "presetDrives": 1, "customDrives": 1, "complete": True, "limitBytes": get_settings().free_plan_storage_bytes}
 
         # the size of a drive is what its master holds
         info = (await c.get(f"/drives/{in_owload}")).json()
@@ -2074,3 +2074,166 @@ async def test_creating_a_drive_on_an_unavailable_storage_explains_why_and_creat
 
         # The failed creation was rolled back: the drive does not exist.
         assert title not in [d["title"] for d in (await c.get("/drives")).json()]
+
+
+# --- Storage limits (decisions/0036) ---
+
+def _user(label: str) -> CurrentUser:
+    return CurrentUser(sub=f"u-{uuid.uuid4()}", username=label, email=f"{label}-{uuid.uuid4().hex[:8]}@example.com", name=label, session_id=f"sid-{uuid.uuid4()}", email_verified=True)
+
+
+async def _start(c, drive_id, size):
+    return await c.post("/sessions", params={"driveId": drive_id, "byteLength": size})
+
+
+async def _write(c, drive_id, size):
+    resp = await _start(c, drive_id, size)
+    assert resp.status_code == 201, resp.text
+    session = resp.json()
+    assert (await c.post("/data", params={"sessionId": session["sessionId"], "start": 0}, content=b"x" * size)).status_code == 204
+    assert (await c.post(f"/sessions/finalize/{session['sessionId']}")).status_code == 204
+    return session
+
+
+@pytest.fixture
+def plan_limit():
+    """Sets the plan's figure for one test."""
+    settings = get_settings()
+    before = settings.free_plan_storage_bytes
+
+    def _set(value: int) -> None:
+        settings.free_plan_storage_bytes = value
+
+    yield _set
+    settings.free_plan_storage_bytes = before
+
+
+async def test_the_plan_limit_is_the_owners_total_in_owload_storage_and_new_writes_stop_at_it(client_as, plan_limit):
+    plan_limit(1000)
+    owner = _user("quota-owner")
+    async with client_as(owner) as c:
+        first = (await c.post("/drives", json={"title": "One", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        second = (await c.post("/drives", json={"title": "Two", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        await _write(c, first, 600)
+        # the limit is over all the owner's drives, not per drive
+        refused = await _start(c, second, 500)
+        assert refused.status_code == 413
+        detail = refused.json()["detail"]
+        assert detail["code"] == "STORAGE_LIMIT_EXCEEDED" and detail["scope"] == "plan"
+        assert detail["limitBytes"] == 1000 and detail["usedBytes"] == 600  # the owner is told the figures
+        await _write(c, second, 400)  # exactly to the limit
+        assert (await _start(c, second, 1)).status_code == 413
+
+        # deleting is never refused, and it frees room: the whole block of the first drive is freed, and 500 bytes fit again
+        assert (await c.get(f"/drives/{first}")).json()["storedBytes"] == 600
+        assert (await c.delete("/data", params={"driveId": first, "start": 0, "end": 10 * BLOCK_SIZE})).status_code == 204
+        assert (await _start(c, second, 500)).status_code == 201
+        assert (await _start(c, second, 101)).status_code == 413
+
+
+async def test_the_plan_limit_holds_for_whoever_writes_and_the_writer_is_not_told_the_owners_figures(client_as, plan_limit):
+    plan_limit(1000)
+    owner, writer = _user("quota-own"), _user("quota-writer")
+    async with client_as(writer) as c:
+        assert (await c.get("/userinfo")).status_code == 200  # people are invited by the email of a profile that exists
+    async with client_as(owner) as c:
+        drive_id = (await c.post("/drives", json={"title": "Shared", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "shared"})).status_code == 200
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": writer.email, "role": "writer"})).status_code == 201
+        await _write(c, drive_id, 900)
+    async with client_as(writer) as c:
+        refused = await _start(c, drive_id, 200)
+        assert refused.status_code == 413
+        detail = refused.json()["detail"]
+        assert detail["scope"] == "plan" and "limitBytes" not in detail and "usedBytes" not in detail
+        assert (await _start(c, drive_id, 100)).status_code == 201
+
+
+async def test_a_drive_on_the_owners_own_s3_is_not_held_by_the_plan_limit(client_as, plan_limit):
+    plan_limit(100)
+    bucket = f"test-quota-{uuid.uuid4().hex[:12]}"
+    await _ensure_minio_bucket(bucket)
+    async with client_as(_user("quota-own-s3")) as c:
+        drive_id = (await c.post("/drives", json={"title": "Own", "keyNonce": "aa", "counterNonce": "bb", "customConfig": _custom_config(bucket)})).json()["id"]
+        await _write(c, drive_id, 5000)
+
+
+async def test_a_drive_limit_set_by_the_owner_holds_the_drive_and_can_be_taken_off(client_as, plan_limit):
+    plan_limit(10_000)
+    owner, writer = _user("quota-limit-owner"), _user("quota-limit-writer")
+    async with client_as(writer) as c:
+        assert (await c.get("/userinfo")).status_code == 200
+    async with client_as(owner) as c:
+        drive_id = (await c.post("/drives", json={"title": "Limited", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        assert (await c.get(f"/drives/{drive_id}")).json()["storageLimitBytes"] is None
+        resp = await c.put(f"/drives/{drive_id}/storage-limit", json={"limitBytes": 500})
+        assert resp.status_code == 200 and resp.json()["storageLimitBytes"] == 500
+        assert next(d for d in (await c.get("/drives")).json() if d["id"] == drive_id)["storageLimitBytes"] == 500
+
+        await _write(c, drive_id, 300)
+        refused = await _start(c, drive_id, 300)
+        assert refused.status_code == 413
+        assert refused.json()["detail"]["scope"] == "drive" and refused.json()["detail"]["limitBytes"] == 500
+
+        assert (await c.put(f"/drives/{drive_id}/storage-limit", json={"limitBytes": 0})).status_code == 422  # a limit is at least a byte
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "shared"})).status_code == 200
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": writer.email, "role": "admin"})).status_code == 201
+
+    async with client_as(writer) as c:
+        # an admin or a writer is held by the limit too, but only the owner sets it
+        assert (await _start(c, drive_id, 300)).status_code == 413
+        assert (await c.put(f"/drives/{drive_id}/storage-limit", json={"limitBytes": None})).status_code == 403
+        assert (await c.get(f"/drives/{drive_id}")).json()["storageLimitBytes"] == 500  # everybody who has the drive sees it
+
+    async with client_as(owner) as c:
+        # no limit of its own: the owner's limit alone holds the drive
+        assert (await c.put(f"/drives/{drive_id}/storage-limit", json={"limitBytes": None})).json()["storageLimitBytes"] is None
+        await _write(c, drive_id, 300)
+
+
+async def test_both_limits_apply_and_the_nearer_one_refuses(client_as, plan_limit):
+    plan_limit(1000)
+    async with client_as(_user("quota-both")) as c:
+        drive_id = (await c.post("/drives", json={"title": "Both", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        assert (await c.put(f"/drives/{drive_id}/storage-limit", json={"limitBytes": 5000})).status_code == 200  # looser than the plan's
+        refused = await _start(c, drive_id, 1500)
+        assert refused.status_code == 413 and refused.json()["detail"]["scope"] == "plan"
+        assert (await c.put(f"/drives/{drive_id}/storage-limit", json={"limitBytes": 200})).status_code == 200  # tighter
+        refused = await _start(c, drive_id, 300)
+        assert refused.status_code == 413 and refused.json()["detail"]["scope"] == "drive"
+
+
+async def test_uploads_that_are_still_going_on_hold_their_room(client_as, plan_limit):
+    """Two uploads that start one after the other, before either has written anything, must not both get the last of the room."""
+    plan_limit(1000)
+    async with client_as(_user("quota-inflight")) as c:
+        drive_id = (await c.post("/drives", json={"title": "In flight", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        first = await _start(c, drive_id, 700)
+        assert first.status_code == 201
+        assert (await _start(c, drive_id, 400)).status_code == 413
+        # what the first one has written is no longer to come: it is counted once, in the storage
+        session_id = first.json()["sessionId"]
+        assert (await c.post("/data", params={"sessionId": session_id, "start": 0}, content=b"x" * 700)).status_code == 204
+        assert (await c.post(f"/sessions/finalize/{session_id}")).status_code == 204
+        assert (await _start(c, drive_id, 300)).status_code == 201
+        assert (await _start(c, drive_id, 1)).status_code == 413
+
+
+async def test_a_copy_of_a_drive_into_owload_storage_must_fit_the_owners_limit(client_as, plan_limit):
+    plan_limit(1000)
+    bucket = f"test-quota-copy-{uuid.uuid4().hex[:12]}"
+    await _ensure_minio_bucket(bucket)
+    async with client_as(_user("quota-copy")) as c:
+        drive_id = (await c.post("/drives", json={"title": "Copy", "keyNonce": "aa", "counterNonce": "bb", "customConfig": _custom_config(bucket)})).json()["id"]
+        await _write(c, drive_id, 800)
+        async with async_session_factory() as db:
+            preset = (await db.execute(select(S3Preset))).scalars().first()
+        if preset is None:
+            pytest.skip("no preset to copy to")
+        # 800 bytes on the user's own S3 are not Owload's storage; a copy of them into a preset is, and must fit
+        plan_limit(500)
+        refused = await c.post(f"/drives/{drive_id}/storage-targets", json={"presetId": str(preset.id)})
+        assert refused.status_code == 413 and refused.json()["detail"]["scope"] == "plan"
+        plan_limit(1000)
+        ok = await c.post(f"/drives/{drive_id}/storage-targets", json={"presetId": str(preset.id)})
+        assert ok.status_code == 201, ok.text

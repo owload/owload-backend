@@ -117,6 +117,14 @@ async def stored_bytes_of(drives: list[Drive], wait_seconds: float = WAIT_FOR_CO
     return result
 
 
+async def count_now(drive_id: uuid.UUID, wait_seconds: float = 10.0) -> bool:
+    """Counts the drive's storages again now (joining a count that is already going on), for a check that cannot use an old number.
+    True when the master was counted; False when it could not be asked in time (the last numbers are then all there is)."""
+    task = _start(drive_id)
+    done, _ = await asyncio.wait([task], timeout=wait_seconds)
+    return task in done and task.result() is not None
+
+
 def mark_stale(drive: Drive) -> None:
     """Something was written or freed: the number is to be counted again the next time somebody asks. Commit with the caller's change."""
     drive.stored_bytes_at = None

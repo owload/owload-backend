@@ -33,6 +33,7 @@ router = APIRouter(prefix="/userinfo", tags=["userinfo"])
 async def get_storage_usage(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> StorageUsageOut:
     """What the drives the user owns take in Owload's storage and in their own S3 (decision 0033). Counted by listing the storages and
     kept for a few minutes, so a first answer may be `complete: false`; ask again in a few seconds."""
@@ -43,6 +44,7 @@ async def get_storage_usage(
         preset_drives=usage.preset_drives,
         custom_drives=usage.custom_drives,
         complete=usage.complete,
+        limit_bytes=settings.free_plan_storage_bytes,
     )
 
 

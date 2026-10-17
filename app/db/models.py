@@ -157,6 +157,10 @@ class Drive(Base):
     stored_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     stored_bytes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # The most the drive may store (what `stored_bytes` counts), set by its owner; null: no limit of its own, only the owner's
+    # (see app/services/quota.py).
+    storage_limit_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
 
 class SessionStatus:
     ACTIVE = 0
@@ -183,6 +187,9 @@ class UploadSession(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_write_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # How much of the reserved region has been written (never more than `byte_length`): what is still to come is room that
+    # the storage does not show yet (app/services/quota.py).
+    written_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
 
     drive: Mapped[Drive] = relationship()
 

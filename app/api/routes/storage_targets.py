@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_accessible_drive_or_404
+from app.core.config import Settings, get_settings
 from app.core.security import CurrentUser, get_current_user
 from app.db.models import (
     DriveStorageTarget,
@@ -33,6 +34,7 @@ from app.services.activity import (
     session_key,
 )
 from app.services.backfill import BackfillService, get_backfill_service
+from app.services.quota import ensure_room_for_copy
 from app.services.secrets import encrypt_secret
 from app.services.storage import BlockStorage, get_storage
 from app.services.storage_targets import ResolvedTarget, resolve_target
@@ -138,6 +140,7 @@ async def add_storage_target(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     ctx: ClientContext = Depends(get_client_context),
+    settings: Settings = Depends(get_settings),
 ) -> StorageTargetOut:
     """Adds a slave target. It's already included in fan-out writes from
     this point on (see get_active_targets) regardless of status — copying
@@ -210,6 +213,9 @@ async def add_storage_target(
             drive_id=drive_id, role=StorageTargetRole.SLAVE, status=initial_status,
             preset_id=preset.id,
         )
+
+    if preset is not None:  # a copy of the drive is made in Owload's own storage: the owner's limit must have room for it
+        await ensure_room_for_copy(db, drive, user.sub, settings)
 
     db.add(target)
     mark_stale(drive)  # a new storage has no count yet
