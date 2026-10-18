@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 # The preset pictures of the profile; the client draws them. Keep in step with owload-frontend
 # (src/components/profile/avatar-presets.tsx). The initials of the user's name are the default (kind "default"), not a preset.
 AVATAR_PRESETS = (
-    "rings", "arcs", "split", "stripes", "dots", "waves", "cipher", "peaks", "keyhole", "moon", "bars",
+    "orbit", "corner", "split", "tiles", "dots", "waves", "cipher", "peaks", "keyhole", "moon", "bars",
 )
 
 # The largest file accepted as a profile picture; the server scales it down and stores a small JPEG (the client scales it

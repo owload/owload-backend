@@ -168,8 +168,8 @@ async def test_userinfo_avatar(client_as):
         assert (await c.get("/userinfo")).json()["avatar"] == DEFAULT_AVATAR
         assert (await c.get("/userinfo/avatar")).status_code == 404
 
-        assert (await c.put("/userinfo/avatar/preset", json={"preset": "rings"})).status_code == 204
-        assert (await c.get("/userinfo")).json()["avatar"] == {"kind": "preset", "preset": "rings", "version": None}
+        assert (await c.put("/userinfo/avatar/preset", json={"preset": "orbit"})).status_code == 204
+        assert (await c.get("/userinfo")).json()["avatar"] == {"kind": "preset", "preset": "orbit", "version": None}
         assert (await c.put("/userinfo/avatar/preset", json={"preset": "sunny"})).status_code == 422
 
         # A wide photo is cropped to a square and scaled down; the stored picture is always a 256 px JPEG.
