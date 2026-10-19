@@ -419,11 +419,13 @@ async def test_sharing_a_drive_roles_invitations_and_the_public_link(client_as, 
 
     sent: list[tuple[str, str, str]] = []
 
-    async def fake_send(settings, to, subject, body):
+    async def fake_send(settings, to, subject, body, html_body=None):
+        assert html_body and "<html" in html_body  # an invitation goes out as text and as HTML
         sent.append((to, subject, body))
         return True
 
     monkeypatch.setattr(access_routes, "send_mail", fake_send)
+    monkeypatch.setattr(get_settings(), "smtp_host", "")  # whatever mail server the environment has, this test is about a deployment without one
 
     def person(label, verified=True):
         uid = f"u-{uuid.uuid4()}"
@@ -566,7 +568,7 @@ async def test_a_drive_tells_when_anyone_last_read_it_and_how_much_it_holds(clie
     from app.api.routes import access as access_routes
     from app.services import activity
 
-    async def fake_send(settings, to, subject, body):
+    async def fake_send(settings, to, subject, body, html_body=None):
         return True
 
     monkeypatch.setattr(access_routes, "send_mail", fake_send)

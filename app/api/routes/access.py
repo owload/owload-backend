@@ -198,8 +198,8 @@ async def add_person(
     )
     await db.commit()
 
-    subject, body = invitation_mail(inviter_name, drive.title, payload.role, settings.app_url, existing_user is not None)
-    email_sent = await send_mail(settings, email, subject, body)
+    subject, body, html_body = invitation_mail(inviter_name, drive.title, payload.role, settings.app_url, existing_user is not None, email)
+    email_sent = await send_mail(settings, email, subject, body, html_body)
     return AddPersonOut(person=person, email_sent=email_sent, app_url=settings.app_url)  # type: ignore[arg-type]
 
 
