@@ -530,7 +530,6 @@ async def test_sharing_a_drive_roles_invitations_and_the_public_link(client_as, 
         # Public: a link that opens the drive read-only, without signing in.
         public = (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "public"})).json()
         assert public["people"] == []
-        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": ben.email, "role": "reader"})).status_code == 409
         link = public["publicLink"]
         token = link.rsplit("/p/", 1)[1]
         assert len(token) >= 40
@@ -2387,3 +2386,83 @@ async def test_a_request_can_be_cancelled_and_there_is_a_budget_of_five_an_hour(
             assert (await c.post(f"/drives/{drive_id}/access-request", json={})).status_code == 201
         assert (await c.post(f"/drives/{drives[5]}/access-request", json={})).status_code == 429  # the sixth in the hour
     access_service._recent_access_requests.clear()
+
+
+async def test_people_belong_to_a_public_drive_too_and_only_a_private_drive_has_none(client_as, monkeypatch):
+    """decisions/0038: a public drive keeps a link for everyone and roles for the people on it; moving between shared and public keeps them,
+    making the drive private takes them off."""
+    from app.api.routes import access as access_routes
+
+    async def fake_send(settings, to, subject, body, html_body=None):
+        return True
+
+    monkeypatch.setattr(access_routes, "send_mail", fake_send)
+    owner, writer, reader = _user("pub-owner"), _user("pub-writer"), _user("pub-reader")
+    for person in (owner, writer, reader):
+        await _register(client_as, person)
+
+    async with client_as(owner) as c:
+        drive_id = (await c.post("/drives", json={"title": "Public with people", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        # a private drive has no people
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": writer.email, "role": "writer"})).status_code == 409
+        public = (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "public"})).json()
+        link = public["publicLink"]
+        assert link
+        # a public drive takes them, with the three roles
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": writer.email, "role": "writer"})).status_code == 201
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": reader.email, "role": "reader"})).status_code == 201
+        listed = (await c.get(f"/drives/{drive_id}/access")).json()
+        assert listed["visibility"] == "public" and {p["email"]: p["role"] for p in listed["people"]} == {writer.email: "writer", reader.email: "reader"}
+
+    async with client_as(writer) as c:
+        info = (await c.get(f"/drives/{drive_id}")).json()
+        assert info["myRole"] == "writer" and info["visibility"] == "public"
+        assert drive_id in [d["id"] for d in (await c.get("/drives")).json()]  # it is in the list of the drives this person is on
+        assert (await c.post(f"/ops/{drive_id}", content=b"w")).status_code in (200, 201, 204)
+
+    async with client_as(reader) as c:
+        assert (await c.get(f"/drives/{drive_id}")).json()["myRole"] == "reader"
+        assert (await c.post(f"/ops/{drive_id}", content=b"r")).status_code == 403
+
+    async with client_as(owner) as c:
+        # shared and public keep the people, in both directions, and the link goes and comes
+        shared = (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "shared"})).json()
+        assert shared["publicLink"] is None and len(shared["people"]) == 2
+        again = (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "public"})).json()
+        assert again["publicLink"] and again["publicLink"] != link and len(again["people"]) == 2
+
+    async with client_as(owner) as c:
+        # private takes them all off
+        private = (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "private"})).json()
+        assert private["people"] == [] and private["publicLink"] is None
+    async with client_as(writer) as c:
+        assert (await c.get(f"/drives/{drive_id}")).status_code == 404
+    async with client_as(reader) as c:
+        assert drive_id not in [d["id"] for d in (await c.get("/drives")).json()]
+
+
+async def test_a_request_for_access_is_approved_on_a_public_drive_and_refused_on_a_private_one(client_as, monkeypatch):
+    from app.api.routes import access as access_routes
+    from app.api.routes import access_requests as request_routes
+    from app.services import access as access_service
+
+    access_service._recent_access_requests.clear()
+
+    async def fake_send(settings, to, subject, body, html_body=None):
+        return True
+
+    monkeypatch.setattr(request_routes, "send_mail", fake_send)
+    monkeypatch.setattr(access_routes, "send_mail", fake_send)
+    owner, stranger = _user("pubreq-owner"), _user("pubreq-stranger")
+    for person in (owner, stranger):
+        await _register(client_as, person)
+    async with client_as(owner) as c:
+        drive_id = (await c.post("/drives", json={"title": "Open", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "public"})).status_code == 200
+    async with client_as(stranger) as c:
+        assert (await c.post(f"/drives/{drive_id}/access-request", json={"message": "please"})).status_code == 201
+    async with client_as(owner) as c:
+        approved = await c.post(f"/drives/{drive_id}/access/requests/{stranger.sub}/approve", json={"role": "writer"})
+        assert approved.status_code == 200 and approved.json()["person"]["role"] == "writer"
+    async with client_as(stranger) as c:
+        assert (await c.get(f"/drives/{drive_id}")).json()["myRole"] == "writer"

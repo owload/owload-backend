@@ -23,7 +23,7 @@ from app.db.models import (
 from app.db.session import get_db
 from app.schemas.drive import CreateDriveIn, DeleteDriveIn, DriveInfoOut, StorageLimitIn
 from app.schemas.drive_action import DriveActionLogOut
-from app.services.access import ROLE_LABELS, SHARED, Role, role_of
+from app.services.access import PUBLIC, ROLE_LABELS, SHARED, Role, role_of
 from app.services.activity import (
     DRIVE_CREATED,
     DRIVE_DELETED,
@@ -158,7 +158,7 @@ async def get_accessible_drives(
     # Mine, and the ones shared with me (only a shared drive has people).
     result = await db.execute(
         select(Drive).where(
-            or_(Drive.owner_user_id == user.sub, and_(Drive.visibility == SHARED, Drive.acl.has_key(user.sub)))
+            or_(Drive.owner_user_id == user.sub, and_(Drive.visibility.in_([SHARED, PUBLIC]), Drive.acl.has_key(user.sub)))
         )
     )
     drives = result.scalars().all()

@@ -22,6 +22,12 @@ SHARED = "shared"
 PUBLIC = "public"
 VISIBILITIES = (PRIVATE, SHARED, PUBLIC)
 
+
+def has_people(visibility: str) -> bool:
+    """Whether a drive of this visibility has people (an ACL): a shared one and a public one; only a private drive is the owner's alone
+    (decisions/0038)."""
+    return visibility in (SHARED, PUBLIC)
+
 READER = "reader"
 WRITER = "writer"
 ADMIN = "admin"
@@ -52,10 +58,10 @@ def parse_role(value: object) -> Role:
 
 def role_of(drive: Drive, user_id: str) -> Role | None:
     """The role the user has on the drive, or None when the drive is not theirs to open: the owner always has the drive; the
-    people in the ACL have it while the drive is shared (an ACL left on a private or public drive counts for nothing)."""
+    people in the ACL have it while the drive is shared or public (an ACL left on a private drive counts for nothing, decisions/0038)."""
     if drive.owner_user_id == user_id:
         return Role.OWNER
-    if drive.visibility != SHARED or user_id not in (drive.acl or {}):
+    if not has_people(drive.visibility) or user_id not in (drive.acl or {}):
         return None
     return parse_role(drive.acl[user_id])
 
@@ -96,7 +102,7 @@ async def accept_invitations(db: AsyncSession, user: CurrentUser) -> list[tuple[
     accepted: list[tuple[Drive, str]] = []
     for invitation in invitations:
         drive = await db.get(Drive, invitation.drive_id)
-        if drive is not None and drive.visibility == SHARED and drive.owner_user_id != user.sub:
+        if drive is not None and has_people(drive.visibility) and drive.owner_user_id != user.sub:
             drive.acl = {**(drive.acl or {}), user.sub: invitation.role}
             accepted.append((drive, invitation.role))
         await db.delete(invitation)

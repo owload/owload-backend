@@ -89,7 +89,7 @@ async def ask_for_access(
     name = (me.name if me and me.name else None) or user.email or "Someone"
     admin_ids = {drive.owner_user_id} | {
         person for person, role in (drive.acl or {}).items()
-        if drive.visibility == access.SHARED and access.parse_role(role) >= access.Role.ADMIN
+        if access.has_people(drive.visibility) and access.parse_role(role) >= access.Role.ADMIN
     }
     recipients = (await db.execute(select(User.email).where(User.id.in_(admin_ids)))).scalars().all()
     link = f"{settings.app_url.rstrip('/')}/drive/{drive.id}/settings"

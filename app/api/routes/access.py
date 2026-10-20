@@ -21,7 +21,7 @@ from app.schemas.access import (
 )
 from app.services import access
 from app.services import activity as events
-from app.services.access import PUBLIC, SHARED, Role
+from app.services.access import PUBLIC, Role
 from app.services.activity import (
     ClientContext,
     get_client_context,
@@ -59,7 +59,7 @@ async def _access_out(db: AsyncSession, drive: Drive, role: Role, settings: Sett
         return out
     if drive.visibility == PUBLIC and drive.public_token:
         out.public_link = access.public_link(settings.app_url, drive.public_token)
-    if drive.visibility != SHARED:
+    if not access.has_people(drive.visibility):
         return out
     ids = list((drive.acl or {}).keys())
     users = (
@@ -100,12 +100,12 @@ async def set_visibility(
     settings: Settings = Depends(get_settings),
 ) -> AccessOut:
     """Makes the drive private, shared or public. Public gives it a link (a new secret each time the drive becomes public);
-    any other visibility ends the link. People belong to a shared drive only: making the drive private or public takes
-    them all off, and cancels the invitations that have not been answered."""
+    any other visibility ends the link. People belong to a shared drive and to a public one (decisions/0038): going between those two
+    keeps them; making the drive private takes them all off, and cancels the invitations that have not been answered."""
     drive, role = await get_drive_and_role(db, drive_id, user.sub, Role.ADMIN)
     if drive.visibility != payload.visibility:
         removed = 0
-        if payload.visibility != SHARED:
+        if payload.visibility == access.PRIVATE:
             removed = len(drive.acl or {}) + (
                 await db.execute(delete(DriveInvitation).where(DriveInvitation.drive_id == drive.id))
             ).rowcount
@@ -151,11 +151,11 @@ async def add_person(
 ) -> AddPersonOut:
     """Shares the drive with an email address. Someone who already has an account with that address (verified by the identity
     provider) gets the drive at once; anyone else gets an invitation that turns into access when they sign in with it. Either
-    way the person is told by mail when the backend can send mail. Only a shared drive has people: for a private or a public
+    way the person is told by mail when the backend can send mail. Only a shared or a public drive has people: for a private
     one the answer is 409."""
     drive, actor_role = await get_drive_and_role(db, drive_id, user.sub, Role.ADMIN)
-    if drive.visibility != SHARED:
-        raise HTTPException(status.HTTP_409_CONFLICT, "People can only be added to a shared drive")
+    if not access.has_people(drive.visibility):
+        raise HTTPException(status.HTTP_409_CONFLICT, "People can only be added to a shared or a public drive")
     email = access.normalize_email(payload.email)
     if not access.is_valid_email(email):
         raise HTTPException(422, "That is not an email address")
@@ -240,16 +240,16 @@ async def approve_request(
     ctx: ClientContext = Depends(get_client_context),
     settings: Settings = Depends(get_settings),
 ) -> AddPersonOut:
-    """Lets the person in with the chosen role and tells them (`emailSent` says whether the mail went out). Only a shared drive has people: for a private or a public one the answer is
-    409 (asking never changes who can see a drive). Only the owner makes an admin."""
+    """Lets the person in with the chosen role and tells them (`emailSent` says whether the mail went out). Only a drive that is shared or public has people: for a private
+    one the answer is 409 (asking never changes who can see a drive). Only the owner makes an admin."""
     drive, actor_role = await get_drive_and_role(db, drive_id, user.sub, Role.ADMIN)
     request = await db.scalar(
         select(DriveAccessRequest).where(DriveAccessRequest.drive_id == drive_id, DriveAccessRequest.user_id == person_id)
     )
     if request is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
-    if drive.visibility != SHARED:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Share the drive with people first: only a shared drive has people")
+    if not access.has_people(drive.visibility):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Share the drive with people first: a private drive has no people")
     _check_may_grant(actor_role, _ROLE_BY_NAME[payload.role])
     person = await db.get(User, person_id)
     if person is None or person_id == drive.owner_user_id:
