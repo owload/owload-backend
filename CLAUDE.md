@@ -188,4 +188,6 @@ the frontend's REST calls one-to-one:
 `app/api/deps.py::get_accessible_drive_or_404` is the shared authorization
 check (owner or present in the drive's `acl` JSONB) — every route touching
 a specific drive calls it and gets an indistinguishable 404 for "doesn't
-exist" vs. "no access."
+exist" vs. "no access." The one exception is deliberate: `/drives/{id}/access-request`
+(app/api/routes/access_requests.py, ADR 0037) tells a signed-in stranger that the drive exists
+and what it is called, so that they can ask for access; nothing else is revealed.

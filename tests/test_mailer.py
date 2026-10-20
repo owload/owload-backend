@@ -106,3 +106,72 @@ def test_a_mail_without_html_stays_plain(monkeypatch):
     settings = Settings(_env_file=None, smtp_host="smtp.example.com", smtp_from="noreply@example.com")
     mailer._send(settings, "person@example.com", "Hello", "Just text")
     assert sent[0].get_content_type() == "text/plain"
+
+
+def test_the_request_mail_names_the_person_and_escapes_what_they_wrote():
+    from app.services.mailer import access_request_mail
+
+    subject, body, html_body = access_request_mail(
+        "Al\r\nBcc: x@example.com", "al@example.com", 'Work "drive"', "<script>alert(1)</script>\nI need the contracts",
+        "https://app.example.com/drive/1/settings", "admin@example.com",
+    )
+    assert "\n" not in subject and "\r" not in subject and "Work" in subject
+    assert "I need the contracts" in body and "https://app.example.com/drive/1/settings" in body
+    assert "<script>" not in html_body and "&lt;script&gt;" in html_body and "<br>I need the contracts" in html_body
+    assert "because you manage this drive" in html_body and "admin@example.com" in html_body
+
+
+def test_the_request_mail_without_a_message_has_none_in_it():
+    from app.services.mailer import access_request_mail
+
+    _, body, html_body = access_request_mail("Alex", "alex@example.com", "Photos", None, "https://app.example.com/x", None)
+    assert "Their message" not in body and "Their message" not in html_body
+
+
+def test_the_answers_to_a_request_are_told_and_the_approval_never_holds_a_password():
+    from app.services.mailer import access_decision_mail
+
+    subject, body, html_body = access_decision_mail("Photos", True, "writer", "https://app.example.com", "alex@example.com")
+    assert "Photos" in subject and "writer" in body and "Ask the person who shared it for its password" in body and "approved" in html_body
+    subject, body, html_body = access_decision_mail("Photos", False, "", "https://app.example.com", "alex@example.com")
+    assert "declined" in subject and "declined" in html_body and "password" not in body
+
+
+def test_extra_headers_of_the_environment_are_put_on_every_mail(monkeypatch):
+    import smtplib
+
+    sent = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self, context=None):
+            pass
+
+        def send_message(self, message):
+            sent.append(message)
+
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    settings = Settings(
+        _env_file=None, smtp_host="smtp.example.com", smtp_from="noreply@example.com",
+        smtp_extra_headers={"X-UNISENDER-GO": '{"track_links": 0, "track_read": 0}'},
+    )
+    mailer._send(settings, "person@example.com", "Hello", "Just text")
+    assert sent[0]["X-UNISENDER-GO"] == '{"track_links": 0, "track_read": 0}'
+
+
+def test_the_extra_headers_are_read_from_a_json_object_in_the_environment(monkeypatch):
+    monkeypatch.setenv("SMTP_EXTRA_HEADERS", '{"X-UNISENDER-GO": "{\\"track_links\\": 0}"}')
+    assert Settings(_env_file=None).smtp_extra_headers == {"X-UNISENDER-GO": '{"track_links": 0}'}
+
+
+def test_empty_extra_headers_in_the_environment_mean_none(monkeypatch):
+    monkeypatch.setenv("SMTP_EXTRA_HEADERS", "")
+    assert Settings(_env_file=None).smtp_extra_headers == {}

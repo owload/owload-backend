@@ -1,6 +1,9 @@
+import json
 from functools import lru_cache
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -43,6 +46,11 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = ""
     smtp_starttls: bool = True
+    # Extra headers put on every mail (a JSON object in the environment). Some mail services rewrite the links of a mail to count the clicks, which
+    # shows the reader an address of the service instead of ours; most have a header that turns that off. For Unisender Go (the account has to be
+    # allowed to turn the tracking of links off by its support):
+    #   SMTP_EXTRA_HEADERS={"X-UNISENDER-GO": "{\"track_links\": 0, \"track_read\": 0}"}
+    smtp_extra_headers: Annotated[dict[str, str], NoDecode] = {}
     # Reads of the public drives of one IP address per minute (the link is the only secret of a public drive).
     public_reads_per_minute: int = 600
 
@@ -56,6 +64,14 @@ class Settings(BaseSettings):
     # — a backend-only Fernet key, unrelated to the client's data-encryption key.
     # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     backend_secret_key: str = ""
+
+    @field_validator("smtp_extra_headers", mode="before")
+    @classmethod
+    def _headers_from_json(cls, value: object) -> object:
+        """The environment gives a JSON object as text; empty text is no headers."""
+        if isinstance(value, str):
+            return json.loads(value) if value.strip() else {}
+        return value
 
 
 @lru_cache

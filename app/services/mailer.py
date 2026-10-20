@@ -27,6 +27,8 @@ def _send(settings: Settings, to: str, subject: str, body: str, html_body: str |
     message["From"] = settings.smtp_from
     message["To"] = to
     message["Subject"] = subject
+    for name, value in settings.smtp_extra_headers.items():
+        message[name] = value
     message.set_content(body)
     if html_body is not None:
         message.add_alternative(html_body, subtype="html")
@@ -74,48 +76,47 @@ _PROMISES = (
 )
 
 
-def _invitation_html(inviter: str, drive_title: str, role: str, link: str, start: str, button: str, recipient: str | None) -> str:
-    """The invitation as an HTML mail. Everything that came from a person (the names, the role, the addresses) is escaped; the styles are
-    inline and the layout is made of tables, which is what mail programs draw reliably."""
-    who, title, role_text = html.escape(inviter), html.escape(drive_title), html.escape(role)
+def _html_mail(title: str, label: str, heading: str, paragraphs: list[str], button: str, link: str, reason: str | None, recipient: str | None, note: str | None = None) -> str:
+    """One mail as HTML, in the layout of the design: a label, the heading, the paragraphs, a button with the link, a note, what Owload does with
+    the files, and why the mail came. `paragraphs`, `note` and `reason` are HTML that the caller has already escaped; the rest is escaped here. The
+    styles are inline and the layout is made of tables, which is what mail programs draw reliably."""
     href, shown_link = html.escape(link, quote=True), html.escape(link)
     body_style = f"font-family: {_BODY}; color: {_INK};"
     muted_style = f"font-family: {_BODY}; color: {_MUTED};"
+    texts = "".join(f'<p style="margin: 0; padding: 0 0 12px; {body_style} font-size: 15px; line-height: 1.6;">{text}</p>' for text in paragraphs)
     promises = "".join(
         f'<tr><td width="30" valign="top" style="padding: 0 0 10px"><div style="width: 20px; height: 20px; border-radius: 10px; background: {_INK}; color: {_YELLOW}; '
         f'font-family: {_BODY}; font-size: 12px; line-height: 20px; font-weight: 700; text-align: center">&#10003;</div></td>'
         f'<td style="padding: 0 0 10px; {body_style} font-size: 14px; line-height: 20px">{html.escape(text)}</td></tr>'
         for text in _PROMISES
     )
+    note_html = f'<p style="margin: 0; padding: 0 0 22px; {muted_style} font-size: 13px; line-height: 1.6;">{note}</p>' if note else ""
     sent_to = (
         f'<p style="margin: 0; padding: 0 0 8px; {muted_style} font-size: 12px; line-height: 1.6;">This message was sent to '
-        f'<a href="mailto:{html.escape(recipient, quote=True)}" style="color: {_MUTED}; text-decoration: underline">{html.escape(recipient)}</a> '
-        f'because {who} shared a drive with this address.</p>'
+        f'<a href="mailto:{html.escape(recipient, quote=True)}" style="color: {_MUTED}; text-decoration: underline">{html.escape(recipient)}</a>'
+        f'{" " + reason if reason else ""}.</p>'
         if recipient else ""
     )
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        f'<meta name="color-scheme" content="light"><title>{who} shared a drive with you</title></head>'
+        f'<meta name="color-scheme" content="light"><title>{html.escape(title)}</title></head>'
         f'<body style="margin: 0; padding: 0; background: {_PAGE}">'
-        f'<div style="display: none; max-height: 0; overflow: hidden; mso-hide: all; font-size: 1px; line-height: 1px; color: {_PAGE}">'
-        f'{who} gave you access to the drive “{title}”.</div>'
+        f'<div style="display: none; max-height: 0; overflow: hidden; mso-hide: all; font-size: 1px; line-height: 1px; color: {_PAGE}">{html.escape(title)}</div>'
         f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background: {_PAGE}"><tr>'
         '<td align="left" valign="top" style="padding: 24px 20px 40px">'
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width: 600px">'
         f'<tr><td align="left" style="padding: 0 8px 20px"><img src="cid:{_LOGO_CID}" alt="owload" height="32" '
         f'style="display: block; height: 32px; width: auto; border: 0; outline: none; text-decoration: none; font-family: {_HEAD}; font-size: 22px; font-weight: 600; color: {_INK}"></td></tr>'
         f'<tr><td align="left" style="padding: 32px 30px 26px; border: 1px solid {_LINE}; border-radius: 16px; background: #FFFFFF">'
-        f'<p style="margin: 0; padding: 0 0 10px; font-family: {_HEAD}; font-size: 12px; line-height: 1.4; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: {_MUTED}">Drive invitation</p>'
-        f'<h1 style="margin: 0; padding: 0 0 14px; font-family: {_HEAD}; font-size: 26px; line-height: 1.25; font-weight: 600; color: {_INK}">{who} shared a drive with you</h1>'
-        f'<p style="margin: 0; padding: 0 0 12px; {body_style} font-size: 15px; line-height: 1.6;">{who} gave you access to the drive <b>“{title}”</b> as <b>{role_text}</b>.</p>'
-        f'<p style="margin: 0; padding: 0 0 16px; {body_style} font-size: 15px; line-height: 1.6;">{html.escape(start)}</p>'
+        f'<p style="margin: 0; padding: 0 0 10px; font-family: {_HEAD}; font-size: 12px; line-height: 1.4; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: {_MUTED}">{html.escape(label)}</p>'
+        f'<h1 style="margin: 0; padding: 0 0 14px; font-family: {_HEAD}; font-size: 26px; line-height: 1.25; font-weight: 600; color: {_INK}">{html.escape(heading)}</h1>'
+        f'{texts}'
         f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin: 8px 0 20px"><tr><td style="border-radius: 10px; background: {_YELLOW}">'
         f'<a href="{href}" style="display: inline-block; padding: 14px 26px; font-family: {_HEAD}; font-size: 15px; line-height: 1.2; font-weight: 600; color: {_INK}; text-decoration: none; border-radius: 10px">{html.escape(button)}</a>'
         '</td></tr></table>'
         f'<p style="margin: 0; padding: 0 0 6px; {muted_style} font-size: 13px; line-height: 1.6;">Or paste this link into your browser:</p>'
         f'<p style="margin: 0; padding: 0 0 20px; font-family: {_MONO}; font-size: 12px; line-height: 1.6; color: {_INK}; word-break: break-all">{shown_link}</p>'
-        f'<p style="margin: 0; padding: 0 0 22px; {muted_style} font-size: 13px; line-height: 1.6;"><b style="color: {_INK}">The drive is encrypted.</b> '
-        'Ask the person who shared it for its password: it is not in this message, and nobody at Owload can recover it.</p>'
+        f'{note_html}'
         f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td style="padding: 8px 0 22px"><div style="height: 1px; line-height: 1px; font-size: 1px; background: {_LINE}">&nbsp;</div></td></tr></table>'
         f'<p style="margin: 0; padding: 0 0 12px; {body_style} font-size: 14px; line-height: 1.6; font-weight: 600;">How Owload keeps your files</p>'
         f'<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">{promises}</table>'
@@ -127,6 +128,16 @@ def _invitation_html(inviter: str, drive_title: str, role: str, link: str, start
     )
 
 
+_PASSWORD_NOTE = (
+    "<b style=\"color: #1D1C19\">The drive is encrypted.</b> Ask the person who shared it for its password: it is not in this message, "
+    "and nobody at Owload can recover it."
+)
+_PASSWORD_NOTE_TEXT = (
+    "The drive is encrypted. Ask the person who shared it for its password: it is not in this message, "
+    "and nobody at Owload can recover it.\n"
+)
+
+
 def invitation_mail(inviter: str, drive_title: str, role: str, link: str, has_account: bool, recipient: str | None = None) -> tuple[str, str, str]:
     """The subject, the plain text and the HTML of an invitation. The text of a mail never holds a password or a key."""
     inviter, drive_title = _one_line(inviter), _one_line(drive_title)
@@ -135,8 +146,53 @@ def invitation_mail(inviter: str, drive_title: str, role: str, link: str, has_ac
     body = (
         f"{inviter} gave you access to the drive “{drive_title}” as {role}.\n\n"
         f"{start}\n{link}\n\n"
-        "The drive is encrypted. Ask the person who shared it for its password: it is not in this message, "
-        "and nobody at Owload can recover it.\n"
+        + _PASSWORD_NOTE_TEXT
     )
+    who, title = html.escape(inviter), html.escape(drive_title)
+    paragraphs = [f"{who} gave you access to the drive <b>“{title}”</b> as <b>{html.escape(role)}</b>.", html.escape(start.rstrip(":") + ".")]
     button = "Open Owload" if has_account else "Sign up or sign in"
-    return subject, body, _invitation_html(inviter, drive_title, role, link, start.rstrip(":") + ".", button, recipient)
+    return subject, body, _html_mail(
+        f"{inviter} shared a drive with you", "Drive invitation", f"{inviter} shared a drive with you", paragraphs, button, link,
+        f"because {who} shared a drive with this address", recipient, _PASSWORD_NOTE,
+    )
+
+
+def access_request_mail(requester: str, requester_email: str, drive_title: str, message: str | None, link: str, recipient: str | None = None) -> tuple[str, str, str]:
+    """The mail to an admin of a drive that somebody asked to be let into (decisions/0037): who, which drive, their message, and the link to the
+    drive's settings, where the request is answered."""
+    requester, requester_email, drive_title = _one_line(requester), _one_line(requester_email), _one_line(drive_title)
+    subject = f"{requester} asked for access to “{drive_title}”"
+    text = f"{requester} ({requester_email}) asked for access to the drive “{drive_title}”.\n\n"
+    who, address, title = html.escape(requester), html.escape(requester_email), html.escape(drive_title)
+    paragraphs = [f"<b>{who}</b> ({address}) asked for access to the drive <b>“{title}”</b>."]
+    if message and message.strip():
+        text += f"Their message:\n{message.strip()}\n\n"
+        quoted = html.escape(message.strip()).replace("\n", "<br>")
+        paragraphs.append(f'Their message:<br><span style="display: inline-block; margin-top: 6px; padding: 10px 14px; border-left: 3px solid {_YELLOW}; background: #F8F7F2">{quoted}</span>')
+    text += f"Choose a role or decline the request in the drive's settings:\n{link}\n"
+    paragraphs.append("Choose a role, or decline, in the drive’s settings.")
+    return subject, text, _html_mail(
+        subject, "Access request", f"{requester} wants access to a drive", paragraphs, "Review the request", link,
+        "because you manage this drive", recipient,
+    )
+
+
+def access_decision_mail(drive_title: str, approved: bool, role: str, link: str, recipient: str | None = None) -> tuple[str, str, str]:
+    """The mail to a person whose request for access was answered (decisions/0037)."""
+    drive_title = _one_line(drive_title)
+    title = html.escape(drive_title)
+    if approved:
+        subject = f"You now have access to “{drive_title}”"
+        text = f"Your request was approved. You can open the drive “{drive_title}” as {role}:\n{link}\n\n" + _PASSWORD_NOTE_TEXT
+        return subject, text, _html_mail(
+            subject, "Access request", "Your request was approved",
+            [f"You can now open the drive <b>“{title}”</b> as <b>{html.escape(role)}</b>."], "Open Owload", link,
+            "because you asked for access to a drive", recipient, _PASSWORD_NOTE,
+        )
+    subject = f"Your request for “{drive_title}” was declined"
+    text = f"An admin of the drive “{drive_title}” declined your request for access.\n\n{link}\n"
+    return subject, text, _html_mail(
+        subject, "Access request", "Your request was declined",
+        [f"An admin of the drive <b>“{title}”</b> declined your request for access."], "Open Owload", link,
+        "because you asked for access to a drive", recipient,
+    )

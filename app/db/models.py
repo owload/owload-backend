@@ -77,6 +77,21 @@ class DriveInvitation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class DriveAccessRequest(Base):
+    """Somebody who is not on a drive asked for access (decisions/0037). One row per person and drive; answered, cancelled, or gone with the drive."""
+
+    __tablename__ = "drive_access_requests"
+    __table_args__ = (UniqueConstraint("drive_id", "user_id", name="uq_drive_access_requests_drive_user"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    drive_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("drives.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class UserSession(Base):
     """A sign-in of a user to Owload, seen by the backend: the Keycloak session id (`sid`) with where it came from. Created the
     first time a token of that session is seen; `revoked_at` is set when the user signs the session out from another device

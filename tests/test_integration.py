@@ -2239,3 +2239,151 @@ async def test_a_copy_of_a_drive_into_owload_storage_must_fit_the_owners_limit(c
         plan_limit(1000)
         ok = await c.post(f"/drives/{drive_id}/storage-targets", json={"presetId": str(preset.id)})
         assert ok.status_code == 201, ok.text
+
+
+# --- Asking for access (decisions/0037) ---
+
+async def _register(client_as, user):
+    async with client_as(user) as c:
+        assert (await c.get("/userinfo")).status_code == 200  # the profile (name, address) the admins are told about
+
+
+async def test_a_stranger_can_ask_for_a_drive_and_the_owner_answers(client_as, monkeypatch):
+    from app.api.routes import access as access_routes
+    from app.api.routes import access_requests as request_routes
+    from app.services import access as access_service
+
+    access_service._recent_access_requests.clear()
+    sent = []
+
+    async def fake_send(settings, to, subject, body, html_body=None):
+        sent.append((to, subject, body, html_body))
+        return True
+
+    monkeypatch.setattr(request_routes, "send_mail", fake_send)
+    monkeypatch.setattr(access_routes, "send_mail", fake_send)
+
+    owner, stranger, admin = _user("ask-owner"), _user("ask-stranger"), _user("ask-admin")
+    for person in (owner, stranger, admin):
+        await _register(client_as, person)
+
+    async with client_as(owner) as c:
+        drive_id = (await c.post("/drives", json={"title": "Work drive", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+
+    async with client_as(stranger) as c:
+        # the rest of the API still does not tell a stranger that the drive exists ...
+        assert (await c.get(f"/drives/{drive_id}")).status_code == 404
+        assert (await c.get(f"/drives/{drive_id}/access")).status_code == 404
+        # ... only this one does, and only the title
+        state = (await c.get(f"/drives/{drive_id}/access-request")).json()
+        assert state["hasAccess"] is False and state["title"] == "Work drive" and state["requested"] is False
+        assert set(state) == {"driveId", "hasAccess", "title", "requested", "requestedAt", "message", "mailEnabled"}
+        assert (await c.get(f"/drives/{uuid.uuid4()}/access-request")).status_code == 404  # no such drive
+
+        asked = await c.post(f"/drives/{drive_id}/access-request", json={"message": "  I need the Q3 contracts.  "})
+        assert asked.status_code == 201
+        assert asked.json()["requested"] is True and asked.json()["message"] == "I need the Q3 contracts." and asked.json()["requestedAt"]
+        # asking again replaces the message
+        again = await c.post(f"/drives/{drive_id}/access-request", json={"message": "Second try"})
+        assert again.json()["message"] == "Second try"
+        assert (await c.post(f"/drives/{drive_id}/access-request", json={"message": "x" * 501})).status_code == 422
+        # a stranger sees no list of requests
+        assert (await c.get(f"/drives/{drive_id}/access/requests")).status_code == 404
+
+    # the owner was told, by mail, with the name, the address and the message (each time the person asks)
+    assert len(sent) == 2 and {mail[0] for mail in sent} == {owner.email}
+    to, subject, body, html_body = sent[-1]
+    assert to == owner.email and "ask-stranger" in subject.lower() and "Work drive" in subject
+    assert "Second try" in body and stranger.email in body and f"/drive/{drive_id}/settings" in body
+    assert html_body and "Second try" in html_body
+
+    async with client_as(owner) as c:
+        requests = (await c.get(f"/drives/{drive_id}/access/requests")).json()
+        assert [(r["userId"], r["email"], r["message"]) for r in requests] == [(stranger.sub, stranger.email, "Second try")]
+
+        # a private drive cannot take people: asking never changes who can see it
+        refused = await c.post(f"/drives/{drive_id}/access/requests/{stranger.sub}/approve", json={"role": "reader"})
+        assert refused.status_code == 409
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "shared"})).status_code == 200
+        assert (await c.post(f"/drives/{drive_id}/access/requests/{uuid.uuid4()}/approve", json={"role": "reader"})).status_code == 404
+
+        sent.clear()
+        approved = await c.post(f"/drives/{drive_id}/access/requests/{stranger.sub}/approve", json={"role": "writer"})
+        assert approved.status_code == 200 and approved.json()["person"]["id"] == stranger.sub and approved.json()["person"]["role"] == "writer"
+        assert approved.json()["emailSent"] is True and approved.json()["appUrl"]
+        assert (await c.get(f"/drives/{drive_id}/access/requests")).json() == []
+    (to, subject, body, _), = sent
+    assert to == stranger.email and "Work drive" in subject and "writer" in body and "password" in body
+    assert f"/drive/{drive_id}" in body  # the mail opens the drive itself
+
+    async with client_as(stranger) as c:
+        assert (await c.get(f"/drives/{drive_id}")).json()["myRole"] == "writer"
+        assert (await c.get(f"/drives/{drive_id}/access-request")).json()["hasAccess"] is True
+        assert (await c.post(f"/drives/{drive_id}/access-request", json={})).status_code == 409  # already on it
+
+
+async def test_an_admin_answers_but_only_the_owner_makes_an_admin_and_declining_tells_the_person(client_as, monkeypatch):
+    from app.api.routes import access as access_routes
+    from app.api.routes import access_requests as request_routes
+    from app.services import access as access_service
+
+    access_service._recent_access_requests.clear()
+    sent = []
+
+    async def fake_send(settings, to, subject, body, html_body=None):
+        sent.append((to, subject))
+        return True
+
+    monkeypatch.setattr(request_routes, "send_mail", fake_send)
+    monkeypatch.setattr(access_routes, "send_mail", fake_send)
+
+    owner, admin, stranger = _user("ans-owner"), _user("ans-admin"), _user("ans-stranger")
+    for person in (owner, admin, stranger):
+        await _register(client_as, person)
+    async with client_as(owner) as c:
+        drive_id = (await c.post("/drives", json={"title": "Shared", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "shared"})).status_code == 200
+        assert (await c.post(f"/drives/{drive_id}/access/people", json={"email": admin.email, "role": "admin"})).status_code == 201
+    async with client_as(stranger) as c:
+        assert (await c.post(f"/drives/{drive_id}/access-request", json={})).status_code == 201
+    assert {to for to, _ in sent} == {owner.email, admin.email}  # the owner and the admins are told
+
+    async with client_as(admin) as c:
+        assert (await c.get(f"/drives/{drive_id}/access/requests")).json()[0]["userId"] == stranger.sub
+        assert (await c.post(f"/drives/{drive_id}/access/requests/{stranger.sub}/approve", json={"role": "admin"})).status_code == 403
+        sent.clear()
+        assert (await c.delete(f"/drives/{drive_id}/access/requests/{stranger.sub}")).status_code == 204
+        assert (await c.delete(f"/drives/{drive_id}/access/requests/{stranger.sub}")).status_code == 404
+    assert sent == [(stranger.email, "Your request for “Shared” was declined")]
+    async with client_as(stranger) as c:
+        assert (await c.get(f"/drives/{drive_id}")).status_code == 404
+        assert (await c.get(f"/drives/{drive_id}/access-request")).json()["requested"] is False
+
+
+async def test_a_request_can_be_cancelled_and_there_is_a_budget_of_five_an_hour(client_as, monkeypatch):
+    from app.api.routes import access_requests as request_routes
+    from app.services import access as access_service
+
+    access_service._recent_access_requests.clear()
+
+    async def fake_send(settings, to, subject, body, html_body=None):
+        return True
+
+    monkeypatch.setattr(request_routes, "send_mail", fake_send)
+    owner, stranger = _user("bud-owner"), _user("bud-stranger")
+    for person in (owner, stranger):
+        await _register(client_as, person)
+    drives = []
+    async with client_as(owner) as c:
+        for index in range(6):
+            drives.append((await c.post("/drives", json={"title": f"D{index}", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"])
+    async with client_as(stranger) as c:
+        assert (await c.post(f"/drives/{drives[0]}/access-request", json={"message": "hi"})).status_code == 201
+        assert (await c.delete(f"/drives/{drives[0]}/access-request")).status_code == 204
+        assert (await c.delete(f"/drives/{drives[0]}/access-request")).status_code == 204  # nothing to take back is not an error
+        assert (await c.get(f"/drives/{drives[0]}/access-request")).json()["requested"] is False
+        assert (await c.delete(f"/drives/{uuid.uuid4()}/access-request")).status_code == 404
+        for drive_id in drives[1:5]:
+            assert (await c.post(f"/drives/{drive_id}/access-request", json={})).status_code == 201
+        assert (await c.post(f"/drives/{drives[5]}/access-request", json={})).status_code == 429  # the sixth in the hour
+    access_service._recent_access_requests.clear()

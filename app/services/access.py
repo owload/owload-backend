@@ -76,6 +76,11 @@ def new_public_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def drive_link(app_url: str, drive_id: uuid.UUID | str) -> str:
+    """The address that opens a drive in the app (after signing in; a person who is not on it is offered to ask for access)."""
+    return f"{app_url.rstrip('/')}/drive/{drive_id}"
+
+
 def public_link(app_url: str, token: str) -> str:
     return f"{app_url.rstrip('/')}/p/{token}"
 
@@ -116,6 +121,25 @@ def public_read_allowed(client_ip: str | None, limit_per_minute: int) -> bool:
     _recent_public_reads[key] = recent
     if len(_recent_public_reads) > 10_000:
         _recent_public_reads.clear()
+    return True
+
+
+_recent_access_requests: dict[str, list[float]] = {}
+ACCESS_REQUESTS_PER_HOUR = 5
+
+
+def access_request_allowed(user_id: str, per_hour: int = ACCESS_REQUESTS_PER_HOUR) -> bool:
+    """A budget of requests for access per person and hour (kept in memory, per process): a request mails the admins of somebody else's
+    drive, so it must not be a way to fill their inbox (decisions/0037)."""
+    now = time.monotonic()
+    recent = [t for t in _recent_access_requests.get(user_id, []) if now - t < 3600.0]
+    if len(recent) >= per_hour:
+        _recent_access_requests[user_id] = recent
+        return False
+    recent.append(now)
+    _recent_access_requests[user_id] = recent
+    if len(_recent_access_requests) > 10_000:
+        _recent_access_requests.clear()
     return True
 
 

@@ -50,3 +50,39 @@ class AddPersonOut(BaseModel):
     person: PersonOut
     email_sent: bool = Field(alias="emailSent")
     app_url: str = Field(alias="appUrl")
+
+
+class AccessRequestIn(BaseModel):
+    """What a person tells the admins of a drive they ask to be let into (decisions/0037). Plain text, at most 500 characters."""
+
+    message: str | None = Field(default=None, max_length=500)
+
+
+class MyAccessRequestOut(BaseModel):
+    """What a signed-in person is told about a drive they may not be on: that it exists, its title, and whether they have asked."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    drive_id: str = Field(alias="driveId")
+    has_access: bool = Field(alias="hasAccess")
+    title: str
+    requested: bool = False
+    requested_at: datetime | None = Field(default=None, alias="requestedAt")
+    message: str | None = None
+    mail_enabled: bool = Field(default=False, alias="mailEnabled")
+
+
+class AccessRequestOut(BaseModel):
+    """A pending request, for the owner and the admins of the drive."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    user_id: str = Field(alias="userId")
+    name: str | None
+    email: str
+    message: str | None
+    requested_at: datetime = Field(alias="requestedAt")
+
+
+class ApproveRequestIn(BaseModel):
+    role: Literal["admin", "writer", "reader"]

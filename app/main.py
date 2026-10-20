@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.deps import require_active_session
 from app.api.routes.access import router as access_router
+from app.api.routes.access_requests import router as access_requests_router
 from app.api.routes.data import router as data_router
 from app.api.routes.drive_restore import router as drive_restore_router
 from app.api.routes.drives import router as drives_router
@@ -33,6 +34,7 @@ for router in (
     drive_restore_router,
     drives_router,
     access_router,
+    access_requests_router,
     ops_router,
     sessions_router,
     data_router,

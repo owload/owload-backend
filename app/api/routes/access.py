@@ -7,10 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_drive_and_role
 from app.core.config import Settings, get_settings
 from app.core.security import CurrentUser, get_current_user
-from app.db.models import Drive, DriveInvitation, User
+from app.db.models import Drive, DriveAccessRequest, DriveInvitation, User
 from app.db.session import get_db
 from app.schemas.access import (
     AccessOut,
+    AccessRequestOut,
+    ApproveRequestIn,
     AddPersonIn,
     AddPersonOut,
     ChangeRoleIn,
@@ -26,7 +28,7 @@ from app.services.activity import (
     record_event,
     session_key,
 )
-from app.services.mailer import invitation_mail, mail_enabled, send_mail
+from app.services.mailer import access_decision_mail, invitation_mail, mail_enabled, send_mail
 
 router = APIRouter(prefix="/drives/{drive_id}/access", tags=["access"])
 
@@ -198,9 +200,96 @@ async def add_person(
     )
     await db.commit()
 
-    subject, body, html_body = invitation_mail(inviter_name, drive.title, payload.role, settings.app_url, existing_user is not None, email)
+    subject, body, html_body = invitation_mail(inviter_name, drive.title, payload.role, access.drive_link(settings.app_url, drive.id), existing_user is not None, email)
     email_sent = await send_mail(settings, email, subject, body, html_body)
     return AddPersonOut(person=person, email_sent=email_sent, app_url=settings.app_url)  # type: ignore[arg-type]
+
+
+@router.get("/requests", response_model=list[AccessRequestOut], response_model_by_alias=True)
+async def list_requests(
+    drive_id: uuid.UUID,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[AccessRequestOut]:
+    """The pending requests of people who asked to be let into the drive (decisions/0037), oldest first. The owner and the admins."""
+    await get_drive_and_role(db, drive_id, user.sub, Role.ADMIN)
+    rows = (
+        await db.execute(
+            select(DriveAccessRequest, User)
+            .join(User, User.id == DriveAccessRequest.user_id, isouter=True)
+            .where(DriveAccessRequest.drive_id == drive_id)
+            .order_by(DriveAccessRequest.created_at)
+        )
+    ).all()
+    return [
+        AccessRequestOut(
+            user_id=request.user_id, name=(person.name or None) if person else None, email=person.email if person else "",
+            message=request.message, requested_at=request.created_at,
+        )
+        for request, person in rows
+    ]
+
+
+@router.post("/requests/{person_id}/approve", response_model=AddPersonOut, response_model_by_alias=True)
+async def approve_request(
+    drive_id: uuid.UUID,
+    person_id: str,
+    payload: ApproveRequestIn,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    ctx: ClientContext = Depends(get_client_context),
+    settings: Settings = Depends(get_settings),
+) -> AddPersonOut:
+    """Lets the person in with the chosen role and tells them (`emailSent` says whether the mail went out). Only a shared drive has people: for a private or a public one the answer is
+    409 (asking never changes who can see a drive). Only the owner makes an admin."""
+    drive, actor_role = await get_drive_and_role(db, drive_id, user.sub, Role.ADMIN)
+    request = await db.scalar(
+        select(DriveAccessRequest).where(DriveAccessRequest.drive_id == drive_id, DriveAccessRequest.user_id == person_id)
+    )
+    if request is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    if drive.visibility != SHARED:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Share the drive with people first: only a shared drive has people")
+    _check_may_grant(actor_role, _ROLE_BY_NAME[payload.role])
+    person = await db.get(User, person_id)
+    if person is None or person_id == drive.owner_user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+
+    drive.acl = {**(drive.acl or {}), person_id: payload.role}
+    await db.delete(request)
+    record_event(
+        db, user.sub, events.DRIVE_PERSON_ADDED, ctx, session_id=session_key(user, ctx),
+        driveId=str(drive.id), title=drive.title, email=person.email, role=payload.role,
+    )
+    await db.commit()
+
+    subject, body, html_body = access_decision_mail(drive.title, True, payload.role, access.drive_link(settings.app_url, drive.id), person.email)
+    email_sent = await send_mail(settings, person.email, subject, body, html_body)
+    return AddPersonOut(person=_member_out(person_id, payload.role, {person_id: person}), email_sent=email_sent, app_url=settings.app_url)  # type: ignore[arg-type]
+
+
+@router.delete("/requests/{person_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def decline_request(
+    drive_id: uuid.UUID,
+    person_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    """Declines a request and tells the person. Always possible, whatever the visibility of the drive."""
+    drive, _ = await get_drive_and_role(db, drive_id, user.sub, Role.ADMIN)
+    request = await db.scalar(
+        select(DriveAccessRequest).where(DriveAccessRequest.drive_id == drive_id, DriveAccessRequest.user_id == person_id)
+    )
+    if request is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Request not found")
+    person = await db.get(User, person_id)
+    await db.delete(request)
+    await db.commit()
+    if person is not None:
+        subject, body, html_body = access_decision_mail(drive.title, False, "", settings.app_url, person.email)
+        await send_mail(settings, person.email, subject, body, html_body)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.patch("/people/{person_id}", response_model=PersonOut)
