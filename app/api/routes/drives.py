@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_accessible_drive_or_404, get_drive_and_role
 from app.api.errors import storage_write_failed
+from app.core.config import Settings, get_settings
 from app.core.security import CurrentUser, get_current_user
 from app.db.models import (
     Drive,
@@ -21,7 +22,7 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
-from app.schemas.drive import CreateDriveIn, DeleteDriveIn, DriveInfoOut, StorageLimitIn
+from app.schemas.drive import AccessPersonOut, CreateDriveIn, DeleteDriveIn, DriveInfoOut, RecentReadOut, StorageLimitIn
 from app.schemas.drive_action import DriveActionLogOut
 from app.services.access import PUBLIC, ROLE_LABELS, SHARED, Role, role_of
 from app.services.activity import (
@@ -35,6 +36,7 @@ from app.services.activity import (
 from app.services.audit import log_action
 from app.services.secrets import encrypt_secret
 from app.services.storage import BlockStorage, BlockWriteError, get_storage
+from app.services.access_summary import Summary, summaries
 from app.services.stored_bytes import stored_bytes_of
 from app.services.storage_targets import (
     get_active_targets,
@@ -47,7 +49,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/drives", tags=["drives"])
 
 
-def _to_drive_info(drive: Drive, role: Role, owner: User | None = None, stored_bytes: int | None = None) -> DriveInfoOut:
+def _to_drive_info(drive: Drive, role: Role, owner: User | None = None, stored_bytes: int | None = None, summary: Summary | None = None) -> DriveInfoOut:
     return DriveInfoOut(
         id=str(drive.id),
         owner_user_id=drive.owner_user_id,
@@ -64,6 +66,11 @@ def _to_drive_info(drive: Drive, role: Role, owner: User | None = None, stored_b
         last_read_at=int(drive.last_read_at.timestamp() * 1000) if drive.last_read_at else None,
         stored_bytes=stored_bytes if stored_bytes is not None else drive.stored_bytes,
         storage_limit_bytes=drive.storage_limit_bytes,
+        access_people=[AccessPersonOut(id=p.id, name=p.name, is_me=p.is_me, role=p.role) for p in summary.people] if summary else [],
+        access_total=summary.total if summary else 1,
+        access_roles=summary.roles if summary else {},
+        public_link=summary.public_link if summary else None,
+        recent_reads=[RecentReadOut(user_id=r.user_id, name=r.name, at=int(r.at.timestamp() * 1000), role=r.role, kind=r.kind) for r in summary.recent_reads] if summary else [],
     )
 
 
@@ -110,6 +117,7 @@ async def create_drive(
     db: AsyncSession = Depends(get_db),
     storage: BlockStorage = Depends(get_storage),
     ctx: ClientContext = Depends(get_client_context),
+    settings: Settings = Depends(get_settings),
 ) -> DriveInfoOut:
     target_kwargs = await _initial_target_kwargs(db, payload)
 
@@ -147,13 +155,15 @@ async def create_drive(
     log_action(db, drive.id, user.sub, DriveAction.CREATE_DRIVE, title=drive.title)
     record_event(db, user.sub, DRIVE_CREATED, ctx, session_id=session_key(user, ctx), driveId=str(drive.id), title=drive.title)
     await db.commit()
-    return _to_drive_info(drive, Role.OWNER, stored_bytes=0)  # nothing is stored in a new drive
+    about = await summaries(db, [(drive, Role.OWNER)], user.sub, settings)
+    return _to_drive_info(drive, Role.OWNER, stored_bytes=0, summary=about.get(drive.id))  # nothing is stored in a new drive
 
 
 @router.get("", response_model=list[DriveInfoOut])
 async def get_accessible_drives(
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> list[DriveInfoOut]:
     # Mine, and the ones shared with me (only a shared drive has people).
     result = await db.execute(
@@ -169,7 +179,9 @@ async def get_accessible_drives(
         else {}
     )
     stored = await stored_bytes_of(list(drives))
-    return [_to_drive_info(d, role_of(d, user.sub) or Role.READER, owners.get(d.owner_user_id), stored.get(d.id)) for d in drives]
+    roles = {d.id: role_of(d, user.sub) or Role.READER for d in drives}
+    about = await summaries(db, [(d, roles[d.id]) for d in drives], user.sub, settings)
+    return [_to_drive_info(d, roles[d.id], owners.get(d.owner_user_id), stored.get(d.id), about.get(d.id)) for d in drives]
 
 
 @router.get("/{drive_id}", response_model=DriveInfoOut)
@@ -177,11 +189,13 @@ async def get_drive_info(
     drive_id: uuid.UUID,
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> DriveInfoOut:
     drive, role = await get_drive_and_role(db, drive_id, user.sub)
     owner = await db.get(User, drive.owner_user_id) if role != Role.OWNER else None
     stored = await stored_bytes_of([drive])
-    return _to_drive_info(drive, role, owner, stored.get(drive.id))
+    about = await summaries(db, [(drive, role)], user.sub, settings)
+    return _to_drive_info(drive, role, owner, stored.get(drive.id), about.get(drive.id))
 
 
 @router.put("/{drive_id}/storage-limit", response_model=DriveInfoOut)

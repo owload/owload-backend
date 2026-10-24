@@ -53,6 +53,29 @@ class DeleteDriveIn(BaseModel):
     )
 
 
+class AccessPersonOut(BaseModel):
+    """Someone on a drive, by name only (decisions/0039). `isMe` marks the person who asks."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    name: str
+    is_me: bool = Field(alias="isMe")
+    role: str
+
+
+class RecentReadOut(BaseModel):
+    """The last time somebody opened or read the drive (milliseconds), with their role and which of the two it was."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    user_id: str = Field(alias="userId")
+    name: str
+    at: int
+    role: str
+    kind: str
+
+
 class DriveInfoOut(BaseModel):
     """Field names/casing match the frontend's DriveInfo interface exactly,
     including the all-caps "ACL" key."""
@@ -81,6 +104,13 @@ class DriveInfoOut(BaseModel):
     stored_bytes: int | None = Field(default=None, alias="storedBytes")
     # The most the drive may store, set by its owner; null: none of its own (the owner's limit is the one that holds it).
     storage_limit_bytes: int | None = Field(default=None, alias="storageLimitBytes")
+    # Who is on the drive, for its card (decisions/0039): at most five of them, how many people that is in all, the roles of the others as counts (the
+    # owner and the admins only), the link of a public drive (the owner and the admins only) and who read it last (everyone on the drive).
+    access_people: list[AccessPersonOut] = Field(default_factory=list, alias="accessPeople")
+    access_total: int = Field(default=1, alias="accessTotal")
+    access_roles: dict[str, int] = Field(default_factory=dict, alias="accessRoles")
+    public_link: str | None = Field(default=None, alias="publicLink")
+    recent_reads: list[RecentReadOut] = Field(default_factory=list, alias="recentReads")
 
 
 class StorageLimitIn(BaseModel):

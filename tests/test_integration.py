@@ -2466,3 +2466,81 @@ async def test_a_request_for_access_is_approved_on_a_public_drive_and_refused_on
         assert approved.status_code == 200 and approved.json()["person"]["role"] == "writer"
     async with client_as(stranger) as c:
         assert (await c.get(f"/drives/{drive_id}")).json()["myRole"] == "writer"
+
+
+# --- What the card of a drive shows about who is on it (decisions/0039) ---
+
+async def test_the_list_of_drives_says_who_is_on_each_and_the_owner_who_read_it(client_as, monkeypatch):
+    from app.api.routes import access as access_routes
+
+    async def fake_send(settings, to, subject, body, html_body=None):
+        return True
+
+    monkeypatch.setattr(access_routes, "send_mail", fake_send)
+    owner, admin, writer, reader = _user("card-owner"), _user("card-admin"), _user("card-writer"), _user("card-reader")
+    for person in (owner, admin, writer, reader):
+        await _register(client_as, person)
+
+    async with client_as(owner) as c:
+        mine = (await c.post("/drives", json={"title": "Mine", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        shared = (await c.post("/drives", json={"title": "Shared", "keyNonce": "aa", "counterNonce": "bb"})).json()["id"]
+        assert (await c.put(f"/drives/{shared}/access/visibility", json={"visibility": "public"})).status_code == 200
+        for person, role in ((admin, "admin"), (writer, "writer"), (reader, "reader")):
+            assert (await c.post(f"/drives/{shared}/access/people", json={"email": person.email, "role": role})).status_code == 201
+
+        # a private drive: only the owner; nothing about reads, no link
+        cards = {d["id"]: d for d in (await c.get("/drives")).json()}
+        assert cards[mine]["accessTotal"] == 1 and [p["name"] for p in cards[mine]["accessPeople"]] == ["You"]
+        assert cards[mine]["accessRoles"] == {} and cards[mine]["publicLink"] is None and cards[mine]["recentReads"] == []
+
+        # a public drive with people: the owner sees them (themselves first), the counts of the roles, the link
+        card = cards[shared]
+        assert card["accessTotal"] == 4 and card["accessPeople"][0] == {"id": owner.sub, "name": "You", "isMe": True, "role": "owner"}
+        assert {p["name"] for p in card["accessPeople"]} == {"You", "card-admin", "card-writer", "card-reader"}
+        assert card["accessRoles"] == {"admin": 1, "writer": 1, "reader": 1}
+        assert card["publicLink"] and "/p/" in card["publicLink"]
+        assert card["recentReads"] == []  # nobody has read it yet
+
+    # the writer and the reader read the drive
+    async with client_as(writer) as c:
+        assert (await c.get("/data", params={"driveId": shared, "start": 0, "end": 1})).status_code == 200
+    async with client_as(reader) as c:
+        assert (await c.get("/data", params={"driveId": shared, "start": 0, "end": 1})).status_code == 200
+
+    async with client_as(owner) as c:
+        card = next(d for d in (await c.get("/drives")).json() if d["id"] == shared)
+        assert {r["name"] for r in card["recentReads"]} == {"card-writer", "card-reader"}  # not the owner's own: there are none yet
+        assert {r["name"]: r["role"] for r in card["recentReads"]} == {"card-writer": "writer", "card-reader": "reader"}
+        assert all(r["at"] > 0 for r in card["recentReads"]) and card["recentReads"][0]["at"] >= card["recentReads"][1]["at"]
+        one = (await c.get(f"/drives/{shared}")).json()
+        assert one["accessTotal"] == 4 and len(one["recentReads"]) == 2  # the same on the single drive
+
+    async with client_as(writer) as c:
+        # a person on the drive sees the names of the others and who read it, but not the link or the roles of the others
+        card = next(d for d in (await c.get("/drives")).json() if d["id"] == shared)
+        assert card["myRole"] == "writer" and card["accessTotal"] == 4
+        assert card["accessPeople"][0]["name"] == "You" and card["accessPeople"][0]["isMe"] is True
+        assert "@" not in " ".join(p["name"] for p in card["accessPeople"])
+        assert card["publicLink"] is None and card["accessRoles"] == {}
+        # ... but who read the drive, as the owner does: themselves and the others, by name
+        assert {r["name"] for r in card["recentReads"]} == {"You", "card-reader"}
+        assert "@" not in " ".join(r["name"] for r in card["recentReads"])
+
+    async with client_as(owner) as c:
+        # the owner's own reads are among theirs, newest first
+        assert (await c.get("/data", params={"driveId": shared, "start": 0, "end": 1})).status_code == 200
+        card = next(d for d in (await c.get("/drives")).json() if d["id"] == shared)
+        assert [r["name"] for r in card["recentReads"]][0] == "You" and {r["name"] for r in card["recentReads"]} == {"You", "card-writer", "card-reader"}
+        # opening the drive (its operations) counts as a read, as it does for "last read"; reading the data of its files is the other kind
+        assert (await c.get(f"/ops/{mine}/0")).status_code == 200
+        private = next(d for d in (await c.get("/drives")).json() if d["id"] == mine)
+        assert [(r["name"], r["kind"]) for r in private["recentReads"]] == [("You", "opened")]  # a private drive: the owner's own reads, and nobody else's
+        assert (await c.get("/data", params={"driveId": mine, "start": 0, "end": 1})).status_code == 200
+        private = next(d for d in (await c.get("/drives")).json() if d["id"] == mine)
+        assert [(r["name"], r["kind"]) for r in private["recentReads"]] == [("You", "read")]  # the later one stands for the person
+
+    async with client_as(owner) as c:
+        # people who were taken off the drive do not appear among the readers
+        assert (await c.delete(f"/drives/{shared}/access/people/{writer.sub}")).status_code == 204
+        card = next(d for d in (await c.get("/drives")).json() if d["id"] == shared)
+        assert {r["name"] for r in card["recentReads"]} == {"You", "card-reader"} and card["accessTotal"] == 3
