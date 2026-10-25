@@ -12,13 +12,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, Request
-from sqlalchemy import and_, delete, func, select, update
+from sqlalchemy import and_, case, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
 from app.core.security import CurrentUser
-from app.db.models import Drive, UserEvent, UserSession
+from app.db.models import Drive, PublicDriveRead, UserEvent, UserSession
 
 # Event kinds.
 SIGN_IN = "sign_in"
@@ -223,6 +223,35 @@ async def note_drive_read(db: AsyncSession, drive_id) -> None:
         _recent_drive_reads.clear()
     _recent_drive_reads[key] = moment
     await db.execute(update(Drive).where(Drive.id == drive_id).values(last_read_at=func.now()))
+    await db.commit()
+
+
+PUBLIC_READS_KEEP = timedelta(days=30)
+_recent_public_reads: dict[tuple[str, str, str], float] = {}
+
+
+async def note_public_read(db: AsyncSession, drive_id, ctx: ClientContext, kind: str) -> None:
+    """Records that somebody without an account read a public drive (`kind`: opened, read): the time and the coarse description of
+    their browser, nothing else (decisions/0040). One row per drive and description, written at most once a minute for each."""
+    key = (str(drive_id), ctx.device, kind)
+    moment = time.monotonic()
+    last = _recent_public_reads.get(key)
+    if last is not None and moment - last < DRIVE_READ_TOUCH_INTERVAL:
+        return
+    if len(_recent_public_reads) > 10_000:
+        _recent_public_reads.clear()
+    _recent_public_reads[key] = moment
+    now = datetime.now(timezone.utc)
+    insert = pg_insert(PublicDriveRead).values(drive_id=drive_id, device=ctx.device, kind=kind, last_at=now)
+    # a visit that has read files stays "read" when the drive's log is fetched again within the burst
+    stays_read = and_(PublicDriveRead.kind == "read", PublicDriveRead.last_at > now - BURST_GAP, insert.excluded.kind == "opened")
+    await db.execute(
+        insert.on_conflict_do_update(
+            index_elements=[PublicDriveRead.drive_id, PublicDriveRead.device],
+            set_={"kind": case((stays_read, PublicDriveRead.kind), else_=insert.excluded.kind), "last_at": now},
+        )
+    )
+    await db.execute(delete(PublicDriveRead).where(PublicDriveRead.drive_id == drive_id, PublicDriveRead.last_at < now - PUBLIC_READS_KEEP))
     await db.commit()
 
 

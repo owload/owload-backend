@@ -1,5 +1,5 @@
 """What the card of a drive shows about who is on it and who read it (owload-docs/decisions/0039): made from the drive's ACL, the profiles of the
-people on it and the "opened" and "read files" events the server already keeps; nothing new is stored. Names only: a person on a drive sees the names of the
+people on it and the "opened" and "read files" events the server already keeps, and, for a public drive, the coarse reads of its visitors (decisions/0040). Names only: a person on a drive sees the names of the
 others, never their addresses, and who read the drive and when (their own reads among them); the owner and the admins also see the roles of the
 others as counts and the public link."""
 import uuid
@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.db.models import Drive, User, UserEvent
+from app.db.models import Drive, PublicDriveRead, User, UserEvent
 from app.services import access
 from app.services.access import Role
 from app.services.activity import DRIVE_FILES_READ, DRIVE_OPENED
@@ -37,6 +37,7 @@ class Read:
     at: datetime
     role: str
     kind: str  # "opened": the drive was opened (its operations read); "read": the data of its files was read
+    device: str | None = None  # only for a visitor without an account: the coarse description of their browser
 
 
 @dataclass
@@ -90,6 +91,18 @@ async def summaries(db: AsyncSession, entries: list[tuple[Drive, Role]], viewer_
             if key not in last_reads or at > last_reads[key][0]:  # the latest of the two kinds: a burst of reads goes on after its first event
                 last_reads[key] = (at, "read" if event_kind == DRIVE_FILES_READ else "opened")
 
+    visitors: dict[str, list[tuple[str, str, datetime]]] = {}
+    public_ids = [str(drive.id) for drive, _ in entries if drive.visibility == access.PUBLIC]
+    if public_ids:
+        since = datetime.now(timezone.utc) - READS_LOOK_BACK
+        for drive_id, device, kind, last_at in (
+            await db.execute(
+                select(PublicDriveRead.drive_id, PublicDriveRead.device, PublicDriveRead.kind, PublicDriveRead.last_at)
+                .where(PublicDriveRead.drive_id.in_([uuid.UUID(i) for i in public_ids]), PublicDriveRead.last_at > since)
+            )
+        ).all():
+            visitors.setdefault(str(drive_id), []).append((device, kind, last_at))
+
     result: dict[uuid.UUID, Summary] = {}
     for drive, role in entries:
         sees_addresses = role >= Role.ADMIN
@@ -117,6 +130,8 @@ async def summaries(db: AsyncSession, entries: list[tuple[Drive, Role]], viewer_
             for (drive_id, uid), (at, how) in last_reads.items()
             if drive_id == str(drive.id) and uid in member_ids
         ]
+        if drive.visibility == access.PUBLIC:  # visitors of the link, told apart by their browser only (decisions/0040)
+            reads += [Read(f"visitor:{device}", "Anonymous visitor", at, "visitor", kind, device) for device, kind, at in visitors.get(str(drive.id), [])]
         summary.recent_reads = sorted(reads, key=lambda r: r.at, reverse=True)[:MAX_READS_SHOWN]
         result[drive.id] = summary
     return result

@@ -70,7 +70,7 @@ def _to_drive_info(drive: Drive, role: Role, owner: User | None = None, stored_b
         access_total=summary.total if summary else 1,
         access_roles=summary.roles if summary else {},
         public_link=summary.public_link if summary else None,
-        recent_reads=[RecentReadOut(user_id=r.user_id, name=r.name, at=int(r.at.timestamp() * 1000), role=r.role, kind=r.kind) for r in summary.recent_reads] if summary else [],
+        recent_reads=[RecentReadOut(user_id=r.user_id, name=r.name, at=int(r.at.timestamp() * 1000), role=r.role, kind=r.kind, device=r.device) for r in summary.recent_reads] if summary else [],
     )
 
 

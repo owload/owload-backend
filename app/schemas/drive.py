@@ -74,6 +74,7 @@ class RecentReadOut(BaseModel):
     at: int
     role: str
     kind: str
+    device: str | None = None
 
 
 class DriveInfoOut(BaseModel):

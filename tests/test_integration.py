@@ -549,6 +549,16 @@ async def test_sharing_a_drive_roles_invitations_and_the_public_link(client_as, 
         assert (await anonymous.get("/public/short")).status_code == 404
         # Nothing but reading: the API of the drive wants a token.
         assert (await anonymous.post(f"/ops/{drive_id}", content=b"x")).status_code == 401
+        # a second visitor with another browser is another row; the same browser is one row, however often it reads
+        await anonymous.get(f"/public/{token}/ops/0", headers={"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"})
+
+    async with client_as(owner) as c:
+        seen = next(d for d in (await c.get("/drives")).json() if d["id"] == drive_id)
+        visitors = [r for r in seen["recentReads"] if r["role"] == "visitor"]
+        assert len(visitors) == 2 and {r["name"] for r in visitors} == {"Anonymous visitor"}
+        assert {r["kind"] for r in visitors} <= {"opened", "read"} and all(r["device"] for r in visitors) and len({r["userId"] for r in visitors}) == 2
+        assert any(r["device"] == "Safari on iOS" for r in visitors)
+        assert "." not in "".join(r["userId"] for r in visitors)  # no address anywhere
 
     async with client_as(owner) as c:
         new_link = (await c.post(f"/drives/{drive_id}/access/link/reset")).json()["publicLink"]
@@ -556,6 +566,7 @@ async def test_sharing_a_drive_roles_invitations_and_the_public_link(client_as, 
         assert new_token != token
         assert (await c.put(f"/drives/{drive_id}/access/visibility", json={"visibility": "shared"})).status_code == 200
         assert (await c.post(f"/drives/{drive_id}/access/link/reset")).status_code == 400
+        assert not [r for r in next(d for d in (await c.get("/drives")).json() if d["id"] == drive_id)["recentReads"] if r["role"] == "visitor"]  # not public any more
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as anonymous:
         assert (await anonymous.get(f"/public/{token}")).status_code == 404
         assert (await anonymous.get(f"/public/{new_token}")).status_code == 404

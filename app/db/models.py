@@ -92,6 +92,18 @@ class DriveAccessRequest(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class PublicDriveRead(Base):
+    """The last time somebody who did not sign in read a public drive through its link, told apart only by a coarse description of their
+    browser ("Safari on iPhone"): one row per drive and description, no address, no cookie, no account (decisions/0040)."""
+
+    __tablename__ = "public_drive_reads"
+
+    drive_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("drives.id", ondelete="CASCADE"), primary_key=True)
+    device: Mapped[str] = mapped_column(String(120), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    last_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class UserSession(Base):
     """A sign-in of a user to Owload, seen by the backend: the Keycloak session id (`sid`) with where it came from. Created the
     first time a token of that session is seen; `revoked_at` is set when the user signs the session out from another device
