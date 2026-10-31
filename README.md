@@ -1,9 +1,30 @@
 # owload-backend
 
-The backend for owload-frontend (an encrypted virtual "drive" with client-side
-encryption). The server never sees plaintext — both the append-only operation
-log and the drive's byte data area are opaque ciphertext from the backend's
-point of view.
+The API of **Owload**, cloud file storage where files are **encrypted on the user's device before they are uploaded**
+([owload-frontend](https://github.com/owload/owload-frontend) is the client that does it). The server never sees plaintext: both the
+append-only operation log and the drive's byte data area are opaque ciphertext from the backend's point of view, and the backend never
+receives a password or a key.
+
+It keeps accounts (as profiles of Keycloak users), drives and who may open them (private, shared with roles, public by a link), the
+encrypted data in S3, and a small log of what happened. What it knows about a drive is its size, its title, its access list and when it was used.
+
+## Three ways to use Owload
+
+| | Where the encrypted files are | Who runs this API | Cost |
+|---|---|---|---|
+| **Web version** | Owload's storage, 3 GB | Owload | Free |
+| **Web version with your own S3** | The user's S3 bucket | Owload | Free |
+| **Self-hosted** | Your S3 bucket | You | Free (your own server) |
+
+### Run your own
+
+The API is published as a Docker image (`owload-backend`, on Docker Hub; the same image runs the workers). It needs PostgreSQL, a Keycloak
+realm (it only verifies the tokens, there are no local passwords) and an S3 bucket. At start it brings the database up to date and serves on
+port 8000 (`GET /healthz`). A complete Compose example with the settings, an HTTPS proxy example and the Keycloak requirements are in
+[owload-docs/operations](https://github.com/owload/owload-docs/tree/main/operations) (`docker-images.md`).
+
+Settings that matter: `DATABASE_URL`, `KEYCLOAK_ISSUER` and `KEYCLOAK_AUDIENCE`, `CORS_ALLOW_ORIGINS`, `APP_URL`, `TRUSTED_PROXY_HOPS`,
+`BACKEND_SECRET_KEY` (encrypts the S3 keys kept in the database; make it once and never change it) and `FREE_PLAN_STORAGE_BYTES`.
 
 Both sides use the `drive`/`driveId` terminology (`/drives`, the `driveId`
 query parameter) since 2026-07-13 — the frontend and the backend are in sync.
